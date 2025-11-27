@@ -1,0 +1,42 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+.venv/
+env/
+venv/
+
+# Data (raw data shouldn't be versioned)
+data/raw/
+*.bin
+*.dat
+*.mat
+*.npy
+*.sig
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs & outputs
+logs/
+*.log
+output/
+results/
+Results_Data/
+
+# Figures
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.eps
+
+# VS Code
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
