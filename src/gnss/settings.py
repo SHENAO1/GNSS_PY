@@ -30,9 +30,15 @@ class Settings:
 
     # ===== 原始信号文件及相关参数 ========================================
     # 注意：这里直接保留你 MATLAB 里的绝对路径，你可以视情况自行修改
+    """     
     fileName: str = (
         r"E:\BaiduSyncdisk\CUC\Code_Online\MATLAB_code_Gongwei\GNSS\data"
-        r"\GNSS_signal_records\GPS_and_GIOVE_A-NN-fs16_3676-if4_1304.bin"
+        r"\GPS_and_GIOVE_A-NN-fs16_3676-if4_1304.bin"
+    ) """
+
+    fileName: str = (
+        r"E:\BaiduSyncdisk\CUC\Code_Online\MATLAB_code_Gongwei\GNSS\data"
+        r"\GPSdata-DiscreteComponents-fs38_192-if9_55.bin"
     )
     dataType: str = "int8"            # 文件中单个采样点的数据类型
 

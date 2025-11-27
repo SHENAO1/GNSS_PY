@@ -1,5 +1,3 @@
-# placeholder for tracking core
-
 # src/gnss/tracking/tracking_core.py
 
 from __future__ import annotations
@@ -10,8 +8,7 @@ from typing import Sequence, Tuple
 import numpy as np
 
 from gnss.tracking.loop.calc_loop_coef import calc_loop_coef
-from gnss.tracking.pre_run import Channel  # 如果你有类型定义的话，可选
-from gnss.tracking.generate_ca_code import generate_ca_code  # 需要你提供对应 Python 版
+from gnss.acquisition.ca_code import generate_ca_code  # ✅ 从 acquisition 导入，而不是 tracking
 
 
 def _dtype_from_string(s: str):
@@ -129,8 +126,6 @@ def tracking(
         tr.PRN = prn
 
         # === 将文件指针移动到该通道的起始码相位对应的位置 ===
-        # MATLAB: fseek(fid, skipBytes + codePhase-1, 'bof')
-        # 这里假定 1 个样本 = 1 个 dataType 的字长
         code_phase_samples = int(_as_attr(ch, "codePhase"))
         offset_bytes = settings.skipNumberOfBytes + (code_phase_samples - 1) * bytes_per_sample
         f.seek(offset_bytes, 0)
@@ -155,7 +150,6 @@ def tracking(
 
         # ================== 毫秒循环 ==================
         for loop_cnt in range(code_periods):
-            # 简单进度输出（可选）
             if (loop_cnt + 1) % 1000 == 0:
                 print(
                     f"Tracking: Ch {ch_idx+1}/{n_ch} "
@@ -164,7 +158,6 @@ def tracking(
 
             # ---------- 读取本 ms 数据 ----------
             code_phase_step = code_freq / settings.samplingFreq
-            # blksize 对应 MATLAB: ceil((codeLength - remCodePhase) / codePhaseStep)
             blksize = int(
                 np.ceil((settings.codeLength - rem_code_phase) / code_phase_step)
             )
@@ -181,7 +174,7 @@ def tracking(
 
             # Early
             t_early = rem_code_phase - early_late_spc + idx_array * code_phase_step
-            idx_e = np.ceil(t_early).astype(int)  # 0-based index into ca_ext
+            idx_e = np.ceil(t_early).astype(int)
             early_code = ca_ext[idx_e]
 
             # Late
@@ -194,7 +187,6 @@ def tracking(
             idx_p = np.ceil(t_prompt).astype(int)
             prompt_code = ca_ext[idx_p]
 
-            # 更新剩余码相位（基于 Prompt 轨迹）
             rem_code_phase = (t_prompt[-1] + code_phase_step) - 1023.0
 
             # ---------- 生成本地载波 ----------
@@ -205,9 +197,8 @@ def tracking(
             carr_cos = np.cos(trigarg[:-1])
             carr_sin = np.sin(trigarg[:-1])
 
-            # ---------- 混频到基带 & 相关 ----------
-            q_baseband = carr_cos * raw  # Q 分支
-            i_baseband = carr_sin * raw  # I 分支
+            q_baseband = carr_cos * raw
+            i_baseband = carr_sin * raw
 
             I_E = float(np.sum(early_code * i_baseband))
             Q_E = float(np.sum(early_code * q_baseband))
@@ -217,7 +208,6 @@ def tracking(
             Q_L = float(np.sum(late_code * q_baseband))
 
             # ================= PLL：载波环 =================
-            # Costas atan 鉴相器
             if I_P != 0.0:
                 carr_err = np.arctan(Q_P / I_P) / (2.0 * np.pi)
             else:
@@ -270,7 +260,6 @@ def tracking(
             tr.Q_P[loop_cnt] = Q_P
             tr.Q_L[loop_cnt] = Q_L
 
-        # 通道状态：目前简单复制 acquisition/pre_run 中的状态
         tr.status = _as_attr(ch, "status")
 
     return track_results, channel

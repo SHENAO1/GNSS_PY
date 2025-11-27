@@ -22,6 +22,10 @@ ephemeris: 从给定的 GPS 导航电文比特流中解码出星历(ephemeris)�
         eph         - 解码出的卫星星历参数（使用 dict 存储，字段名与 MATLAB 结构体相同）。
 """
 
+import numpy as np
+from gnss.navigation.ephemeris.nav_party_chk import check_t  # 对应 MATLAB 的 check_t
+
+
 from typing import Tuple, Dict
 
 from gnss.utils.signal_utils import check_phase          # 对应 MATLAB 的 checkPhase
@@ -224,3 +228,21 @@ def ephemeris(bits: str, D30Star: str) -> Tuple[Dict[str, float], int]:
     TOW = int(subframe[30:47], 2) * 6 - 30
 
     return eph, TOW
+
+
+def check_t(time: float) -> float:
+    """
+    SoftGNSS: check_t.m 的 Python 实现。
+    处理 GPS 时间的周内跳变（week crossover）：
+    如果时间差超过 ±302400 秒（半个 GPS 周），就需要折回。
+    """
+    half_week = 302400.0  # seconds
+
+    corr_time = time
+
+    if time > half_week:
+        corr_time = time - 2.0 * half_week
+    elif time < -half_week:
+        corr_time = time + 2.0 * half_week
+
+    return corr_time

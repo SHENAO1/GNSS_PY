@@ -7,16 +7,26 @@ import numpy as np
 
 from gnss.navigation.nav_msg import find_preambles
 from gnss.navigation.pseudorange import calculate_pseudoranges
+
+# 卫星星历与时间修正相关
 from gnss.navigation.ephemeris.ephemeris import (
-    ephemeris,          # 你需要自己迁移 ephemeris.m
-    satpos,
-    least_square_pos,   # 对应 leastSquarePos.m
+    ephemeris,   # 解析广播星历
+    check_t,     # 周首/周末时间跳变修正
+    # 如果 ephemeris.py 里还有别的工具函数，也可以一并导入
 )
-from gnss.navigation.ephemeris.coord import (  # 你可以按自己习惯组织这几个函数
+
+# 卫星位置与钟差
+from gnss.navigation.ephemeris.satpos import satpos
+
+# 坐标转换相关函数，现在放在 utils/geo_functions.py 里
+from gnss.utils.geo_functions import (
     cart2geo,
-    findUtmZone,
+    find_utm_zone,
     cart2utm,
 )
+
+
+
 
 
 def _get_field(tr, name):
@@ -230,7 +240,7 @@ def post_navigation(
             nav.longitude[epoch_idx] = lon
             nav.height[epoch_idx] = hgt
 
-            utm_zone = findUtmZone(lat, lon)
+            utm_zone = find_utm_zone(lat, lon)
             nav.utmZone = utm_zone
 
             E, N, U = cart2utm(nav.X[epoch_idx], nav.Y[epoch_idx], nav.Z[epoch_idx], utm_zone)

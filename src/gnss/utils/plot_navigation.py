@@ -3,13 +3,9 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-# 你自己的天空图函数（已有）
 from gnss.navigation.skyplot import sky_plot
 
 
-# -----------------------
-# 辅助函数：deg → [deg, min, sec]
-# -----------------------
 def deg_to_dms(deg):
     """将十进制度 → (度, 分, 秒)"""
     d = int(deg)
@@ -19,33 +15,40 @@ def deg_to_dms(deg):
     return d, m, s
 
 
-# ======================
-# 主函数：plot_navigation
-# ======================
 def plot_navigation(nav_solutions, settings):
     """
-    绘制导航解算结果，与 MATLAB plotNavigation 完全一致。
+    绘制导航解算结果，与 MATLAB plotNavigation 类似。
 
-    参数
-    ----
-    nav_solutions : 对象或 dict
-        必须包含字段：
-            E, N, U （UTM坐标）
-            longitude, latitude, height
-            DOP
-            channel.az / channel.el / channel.PRN
-    settings : Settings
-        settings.truePosition.E/N/U 用于参考点选择
+    nav_solutions 需要包含：
+        E, N, U
+        longitude, latitude, height
+        DOP
+        channel.az / channel.el / channel.PRN
     """
 
+    # -------- 基本空值 / 失败防护 --------
     if nav_solutions is None:
-        print("plotNavigation: No navigation data to plot.")
+        print("plotNavigation: nav_solutions 为 None，跳过绘图。")
+        return
+
+    # post_navigation 早退时会返回 SimpleNamespace()（无任何字段）
+    if not hasattr(nav_solutions, "E") or not hasattr(nav_solutions, "N") or not hasattr(nav_solutions, "U"):
+        print(
+            "plotNavigation: nav_solutions 中没有 E/N/U 字段，"
+            "说明导航解算未成功（记录时间太短、卫星太少或星历不足），跳过绘图。"
+        )
+        return
+
+    # 如果 E 是空数组，也没法画
+    E_arr = np.asarray(nav_solutions.E)
+    if E_arr.size == 0 or np.all(np.isnan(E_arr)):
+        print("plotNavigation: E/N/U 为空或全为 NaN，跳过绘图。")
         return
 
     # -----------------------
     # 1. 选择参考坐标
     # -----------------------
-    E = np.asarray(nav_solutions.E)
+    E = E_arr
     N = np.asarray(nav_solutions.N)
     U = np.asarray(nav_solutions.U)
 
@@ -59,7 +62,6 @@ def plot_navigation(nav_solutions, settings):
         ref_N = np.nanmean(N)
         ref_U = np.nanmean(U)
 
-        # 经纬度平均值
         lon_mean = np.nanmean(nav_solutions.longitude)
         lat_mean = np.nanmean(nav_solutions.latitude)
         hgt_mean = np.nanmean(nav_solutions.height)
@@ -115,7 +117,7 @@ def plot_navigation(nav_solutions, settings):
     ax1.autoscale()
 
     # -----------------------
-    # 4. 3D 位置图（俯视）
+    # 4. 俯视位置图 (E-N 平面)
     # -----------------------
     ax2.plot(diff_E, diff_N, "+", label="Measurements")
     ax2.plot(0, 0, "r+", markersize=10, label=ref_point_text)
@@ -127,20 +129,23 @@ def plot_navigation(nav_solutions, settings):
     ax2.set_aspect("equal", adjustable="box")
     ax2.legend()
 
-    # MATLAB uses view(0, 90) → top-down view  
-    # 2D 投影即可，无需 3D axes。
-
     # -----------------------
     # 5. 天空图（SkyPlot）
     # -----------------------
-    sky_plot(
-        ax3,
-        nav_solutions.channel.az,
-        nav_solutions.channel.el,
-        nav_solutions.channel.PRN[:, 0],  # MATLAB PRN(:,1)
-    )
-    mean_pdop = np.nanmean(nav_solutions.DOP[1, :])  # MATLAB DOP(2,:)
-    ax3.set_title(f"Sky plot (mean PDOP: {mean_pdop:.2f})")
+    if not hasattr(nav_solutions, "channel"):
+        print("plotNavigation: nav_solutions.channel 不存在，无法绘制天空图。")
+    else:
+        try:
+            sky_plot(
+                ax3,
+                nav_solutions.channel.az,
+                nav_solutions.channel.el,
+                nav_solutions.channel.PRN[:, 0],
+            )
+            mean_pdop = np.nanmean(nav_solutions.DOP[1, :])  # MATLAB DOP(2,:)
+            ax3.set_title(f"Sky plot (mean PDOP: {mean_pdop:.2f})")
+        except Exception as e:
+            print(f"plotNavigation: 绘制天空图时出错：{e!r}")
 
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     plt.show()

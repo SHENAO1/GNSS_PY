@@ -61,7 +61,7 @@ def nav_party_chk(ndat: np.ndarray) -> int:
     ndat = ndat.copy()  # 避免修改输入
 
     # --- 检查数据位是否需要反相 (用于内部计算) -----------------------------
-    # GPS规范规定：d1~d24 在计算奇偶校验前需要与 D30* 异或。
+    # GPS 规范规定：d1~d24 在计算奇偶校验前需要与 D30* 异或。
     #
     # MATLAB 代码: if (ndat(2) ~= 1)
     # 其中 ndat(2)=1 代表 bit=1，ndat(2)=-1 代表 bit=0。
@@ -129,3 +129,29 @@ def nav_party_chk(ndat: np.ndarray) -> int:
         status = 0
 
     return int(status)
+
+
+def check_t(time):
+    """
+    对应 MATLAB 的 check_t.m
+    功能：修正周首 / 周末交叉处的时间（GPS 周滚动）
+
+    输入:
+        time : 标量或 numpy 数组，单位为秒 (s)
+
+    输出:
+        corr_time : 修正后的时间（同维度）
+    """
+    half_week = 302400.0  # 一周的一半，单位秒
+
+    # 兼容标量和数组
+    t = np.asarray(time, dtype=float)
+    corr = t.copy()
+
+    corr[corr > half_week] -= 2 * half_week
+    corr[corr < -half_week] += 2 * half_week
+
+    # 如果输入是标量，就返回标量，尽量模仿 MATLAB 使用习惯
+    if np.isscalar(time):
+        return float(corr)
+    return corr
