@@ -12,7 +12,8 @@ import numpy as np
 from gnss.acquisition.acquisition_core import acquisition
 from gnss.tracking.pre_run import pre_run
 from gnss.tracking.show_channel_status import show_channel_status
-from gnss.tracking.tracking_core import tracking
+# ✅ 使用内存版 tracking（一次性读入整个数据）
+from gnss.tracking.tracking_core import tracking_from_array
 
 from gnss.navigation.navigation import post_navigation
 
@@ -82,13 +83,16 @@ def post_processing(settings, acq_results: Optional[dict] = None):
     if not os.path.isfile(filename):
         raise FileNotFoundError(f"无法找到数据文件: {filename}")
 
+    # 统一在这里一次性把整段数据读入内存（仿真场景推荐）
+    dtype = _dtype_from_string(settings.dataType)
     try:
-        f = open(filename, "rb")
+        with open(filename, "rb") as f:
+            raw_signal = np.fromfile(f, dtype=dtype)
     except OSError as e:
         raise RuntimeError(f"无法读取文件 {filename}: {e}") from e
 
-    # 从文件开头偏移 skipNumberOfBytes 字节
-    f.seek(settings.skipNumberOfBytes, os.SEEK_SET)
+    if raw_signal.size == 0:
+        raise RuntimeError("原始数据文件为空，无法处理。")
 
     # ---------- 捕获阶段 ----------
     if settings.skipAcquisition == 0 or acq_results is None:
@@ -102,15 +106,22 @@ def post_processing(settings, acq_results: Optional[dict] = None):
 
         # 读取 11 ms 数据用于粗捕获 + 精细频率估计
         n_samples = 11 * samples_per_code
-        dtype = _dtype_from_string(settings.dataType)
 
-        raw = np.fromfile(f, dtype=dtype, count=n_samples)
-        if raw.size < n_samples:
-            f.close()
-            raise RuntimeError("原始数据长度不足以进行 11 ms 捕获。")
+        # 根据 skipNumberOfBytes 计算应跳过的样本数
+        bytes_per_sample = np.dtype(dtype).itemsize
+        skip_samples = settings.skipNumberOfBytes // bytes_per_sample
+
+        start_idx = skip_samples
+        end_idx = start_idx + n_samples
+
+        if end_idx > raw_signal.size:
+            raise RuntimeError(
+                f"原始数据长度不足以进行 11 ms 捕获："
+                f"需要 {end_idx} 个样本，实际只有 {raw_signal.size} 个样本。"
+            )
 
         # 转成 float 方便后续处理
-        data = raw.astype(np.float64)
+        data = raw_signal[start_idx:end_idx].astype(np.float64, copy=False)
 
         print("   Acquiring satellites...")
         print("   正在捕获卫星...")
@@ -130,21 +141,19 @@ def post_processing(settings, acq_results: Optional[dict] = None):
     if not np.any(carr_freq):
         print("No GNSS signals detected, signal processing finished.")
         print("未检测到 GNSS 信号，信号处理结束。")
-        f.close()
         return
 
     # ---------- 初始化通道 ----------
     channel = pre_run(acq_results, settings)
     show_channel_status(channel, settings)
 
-    # ---------- 跟踪阶段 ----------
+    # ---------- 跟踪阶段（使用内存版 tracking_from_array） ----------
     start_time = datetime.now()
     print(f"   Tracking started at {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"   跟踪开始于 {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
-    track_results, channel = tracking(f, channel, settings)
-
-    f.close()
+    # 这里不再传文件句柄，而是整段 raw_signal
+    track_results, channel = tracking_from_array(raw_signal, channel, settings)
 
     elapsed = datetime.now() - start_time
     # 格式化为 HH:MM:SS
@@ -160,7 +169,9 @@ def post_processing(settings, acq_results: Optional[dict] = None):
         "trackingResults.npz",
         track_results,
         settings,
-        acq_results if isinstance(acq_results, dict) else {
+        acq_results
+        if isinstance(acq_results, dict)
+        else {
             "carr_freq": acq_results.carrFreq,
             "code_phase": acq_results.codePhase,
             "peak_metric": acq_results.peakMetric,
