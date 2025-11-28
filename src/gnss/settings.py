@@ -28,13 +28,16 @@ class Settings:
     numberOfChannels: int = 8         # 通道数
     skipNumberOfBytes: int = 0        # 从文件开头跳过的字节数
 
+    # ✅ GPU 开关：False=只用 CPU，True=尝试用 CuPy+GPU
+    use_gpu_tracking: bool = False    # <<< 新增
+
     # ===== 原始信号文件及相关参数 ========================================
-    # 注意：这里直接保留你 MATLAB 里的绝对路径，你可以视情况自行修改
-    """     
+    """
     fileName: str = (
         r"E:\BaiduSyncdisk\CUC\Code_Online\MATLAB_code_Gongwei\GNSS\data"
         r"\GPS_and_GIOVE_A-NN-fs16_3676-if4_1304.bin"
-    ) """
+    )
+    """
 
     fileName: str = (
         r"E:\BaiduSyncdisk\CUC\Code_Online\MATLAB_code_Gongwei\GNSS\data"
