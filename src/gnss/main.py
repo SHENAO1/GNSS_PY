@@ -9,7 +9,7 @@ import sys
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))  # .../src/gnss
 SRC_DIR = os.path.dirname(CURRENT_DIR)                    # .../src
 if SRC_DIR not in sys.path:
-    sys.path.insert(0, SRC_DIR)1
+    sys.path.insert(0, SRC_DIR)
 
 from gnss.settings import init_settings
 from gnss.utils.probe_data import probe_data
