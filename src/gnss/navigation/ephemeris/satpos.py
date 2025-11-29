@@ -35,36 +35,6 @@ def satpos(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     根据星历计算多个卫星在“信号传输时刻”的 ECEF 坐标和卫星钟差。
-
-    对应 MATLAB:
-        [satPositions, satClkCorr] = satpos(transmitTime, prnList, eph, settings);
-
-    参数
-    ----
-    transmit_time : float
-        信号传输时刻（GPS 时间，秒），通常是接收时刻减去粗略传播时间。
-    prn_list : Iterable[int]
-        需要计算的 PRN 列表，例如 [1, 3, 8, 11]。
-    eph_all : Dict[int, Dict[str, float]]
-        所有卫星的星历字典：
-            key   = PRN 号 (int)
-            value = 对应 PRN 的星历参数字典，字段名与 ephemeris.py 中一致，
-                    如 "sqrtA", "e", "t_oe", "M_0", "omega" 等。
-    settings : Any
-        保留参数（为了接口跟 MATLAB 一致），当前函数内部没有使用，可为 None。
-
-    返回
-    ----
-    sat_positions : np.ndarray
-        形状为 (3, N) 的卫星坐标矩阵，单位：米。
-        第 0 行: X 坐标
-        第 1 行: Y 坐标
-        第 2 行: Z 坐标
-
-    sat_clk_corr : np.ndarray
-        长度为 N 的卫星钟差校正（秒）。
-        使用时应从观测量对应的时间中减去该值：
-            t_corrected = t_measured - sat_clk_corr[k]
     """
 
     prns = list(prn_list)
@@ -76,16 +46,32 @@ def satpos(
 
     # =================== 逐颗卫星处理 =================== #
     for idx, prn in enumerate(prns):
-        # 取出该 PRN 的星历字典
-        eph = eph_all[prn]
+        # 取出该 PRN 的星历（可能是 dict，也可能是 SimpleNamespace）
+        eph_obj = eph_all[prn]
+        if hasattr(eph_obj, "__dict__"):
+            eph = eph_obj.__dict__
+        else:
+            eph = eph_obj
+
+        # ---- 检查是否有计算所需的全部字段，防止 KeyError ----
+        required_fields = [
+            "sqrtA", "t_oe", "deltan", "M_0", "e",
+            "omega", "C_uc", "C_us", "C_rc", "C_rs",
+            "i_0", "iDot", "C_ic", "C_is",
+            "omega_0", "omegaDot",
+            "t_oc", "a_f0", "a_f1", "a_f2", "T_GD",
+        ]
+        missing = [k for k in required_fields if k not in eph]
+        if missing:
+            print(f"[satpos] PRN {prn} 星历缺少字段: {missing}，跳过该星。")
+            sat_positions[:, idx] = np.nan
+            sat_clk_corr[idx] = np.nan
+            continue
 
         # ================== 1. 初始卫星钟差（不含相对论项） ==================
-
-        # 时间差：当前时刻相对于星历中 t_oc 的偏移（注意要做周界规约）
         dt = check_t(transmit_time - eph["t_oc"])
 
         # 星历中提供的钟差多项式 + 群延迟差 T_GD
-        # satClkCorr = (a_f2 * dt + a_f1) * dt + a_f0 - T_GD
         clk_corr = (eph["a_f2"] * dt + eph["a_f1"]) * dt + eph["a_f0"] - eph["T_GD"]
 
         # 传播信号的实际发送时刻（考虑钟差）
@@ -169,10 +155,6 @@ def satpos(
         cos_i = math.cos(i)
         sin_i = math.sin(i)
 
-        # 对应 MATLAB:
-        # X = cos(u)*r * cos(Omega) - sin(u)*r * cos(i)*sin(Omega);
-        # Y = cos(u)*r * sin(Omega) + sin(u)*r * cos(i)*cos(Omega);
-        # Z = sin(u)*r * sin(i);
         x = cos_u * r * cos_Omega - sin_u * r * cos_i * sin_Omega
         y = cos_u * r * sin_Omega + sin_u * r * cos_i * cos_Omega
         z = sin_u * r * sin_i
@@ -182,8 +164,7 @@ def satpos(
         sat_positions[2, idx] = z
 
         # ================== 3. 把相对论钟差加到总钟差里 ==================
-
-        # 最终钟差 = 多项式钟差 - T_GD + dtr
         sat_clk_corr[idx] = clk_corr + dtr
 
     return sat_positions, sat_clk_corr
+

@@ -43,7 +43,7 @@ def main():
     settings.saveTrackingResults = False           # 需要保存时打开
     # settings.resultsDir = r"E:\GNSS_py_results"  # 想改目录就改这里
 
-    # 是否绘制跟踪结果的各种图形，默认 Flase
+    # 是否绘制跟踪结果的各种图形，默认 Flase 
     settings.plotTracking = False
 
 

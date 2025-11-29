@@ -133,21 +133,16 @@ def find_preambles(
 
             # 边界检查
             if start_ms < 1 or end_ms > bits.size:
-                # 原 code 没太多边界判断，这里多一道保险
                 continue
 
-            # 映射到 Python 0-based 索引：
-            # MATLAB start_ms .. end_ms (inclusive)
+            # MATLAB: start_ms .. end_ms (inclusive)
             # -> Python [start_ms-1 : end_ms)
             seg = bits[start_ms - 1 : end_ms].copy()
 
             if seg.size != 1240:
-                # 理论上应为 62 * 20 = 1240
                 continue
 
-            # 将样本按 20ms 一组形成 (20, N) 矩阵，每列对应一个比特
-            # MATLAB: reshape(bits, 20, size(bits,1)/20) (column-major)
-            # Python 中可以：先按 (Nbit, 20) 再转置
+            # 将样本按 20ms 一组形成 (20, Nbit) 矩阵，每列对应一个比特
             seg_mat = seg.reshape(-1, 20).T  # 形状 (20, Nbit)
 
             # 对每列求和 -> “积分与倾泄”
@@ -160,13 +155,25 @@ def find_preambles(
                 continue
 
             # --- 奇偶校验：nav_party_chk ---------------------------------
-            # 第一个字：前一字的最后 2bit + TLM 字 30bit -> 共 32bit
-            word1 = bits_hard2[0:32]
-            # 第二个字：TLM 字最后 2bit + HOW 字 30bit -> 共 32bit
-            word2 = bits_hard2[30:62]
+            # 注意：nav_party_chk 一般以 0/1 比特为输入，0 表示校验通过
 
-            if nav_party_chk(word1) != 0 and nav_party_chk(word2) != 0:
-                # 通过奇偶校验，确认是真实前导码
+            # 第一个字：前一字的最后 2bit + TLM 字 30bit -> 共 32bit
+            word1_pm = bits_hard2[0:32]      # ±1
+            # 第二个字：TLM 字最后 2bit + HOW 字 30bit -> 共 32bit
+            word2_pm = bits_hard2[30:62]     # ±1
+
+            # 转换成 0/1：+1 -> 1, -1 -> 0
+            word1 = (word1_pm > 0).astype(int)
+            word2 = (word2_pm > 0).astype(int)
+
+            status1 = nav_party_chk(word1)
+            status2 = nav_party_chk(word2)
+
+            # 调试: 如需查看具体状态可打开下面这行
+            # print(f"[CHK DEBUG] ch={channel_nr}, idx_i={idx_i}, status1={status1}, status2={status2}")
+
+            # MATLAB navPartyChk: 0 表示通过，非 0 表示出错
+            if status1 == 0 and status2 == 0:
                 first_sub_frame[idx_ch] = int(idx_i)
                 found_for_this_channel = True
                 break  # 跳出此通道的峰值循环
