@@ -12,7 +12,7 @@ import numpy as np
 from gnss.acquisition.acquisition_core import acquisition
 from gnss.tracking.pre_run import pre_run
 from gnss.tracking.show_channel_status import show_channel_status
-# ✅ 使用内存版 tracking（一次性读入整个数据）
+# ✅ 使用内存版 tracking（一次性读入需要的这段数据）
 from gnss.tracking.tracking_core import tracking_from_array
 
 from gnss.navigation.navigation import post_navigation
@@ -134,7 +134,6 @@ def post_processing(settings, acq_results: Optional[dict] = None):
     if not os.path.isfile(filename):
         raise FileNotFoundError(f"无法找到数据文件: {filename}")
 
-    # 统一在这里一次性把整段数据读入内存（仿真场景推荐）
     dtype = _dtype_from_string(settings.dataType)
     try:
         with open(filename, "rb") as f:
@@ -145,25 +144,53 @@ def post_processing(settings, acq_results: Optional[dict] = None):
     if raw_signal.size == 0:
         raise RuntimeError("原始数据文件为空，无法处理。")
 
-    # ---------- 捕获阶段 ----------
-    if settings.skipAcquisition == 0 or acq_results is None:
-        # 计算每个 C/A 码周期的采样点数 (1 ms)
-        samples_per_code = int(
-            round(
-                settings.samplingFreq
-                / (settings.codeFreqBasis / settings.codeLength)
-            )
+    # 每个样本字节数 + 需要跳过的样本
+    bytes_per_sample = np.dtype(dtype).itemsize
+    skip_samples = settings.skipNumberOfBytes // bytes_per_sample
+
+    if skip_samples >= raw_signal.size:
+        raise RuntimeError(
+            f"skipNumberOfBytes 太大，跳过后的样本数为 0："
+            f"skip_samples = {skip_samples}, 文件总样本数 = {raw_signal.size}"
         )
 
-        # 读取 11 ms 数据用于粗捕获 + 精细频率估计
-        n_samples = 11 * samples_per_code
+    # ====== 统一计算：每 ms 的采样点数（= 每个 C/A 码周期的采样点数）======
+    samples_per_ms = int(
+        round(
+            settings.samplingFreq
+            / (settings.codeFreqBasis / settings.codeLength)
+        )
+    )
 
-        # 根据 skipNumberOfBytes 计算应跳过的样本数
-        bytes_per_sample = np.dtype(dtype).itemsize
-        skip_samples = settings.skipNumberOfBytes // bytes_per_sample
+    # 可用总毫秒数（从 skip 之后算起）
+    total_ms_available = (raw_signal.size - skip_samples) // samples_per_ms
+
+    print(f"[DEBUG] 文件总样本数 = {raw_signal.size}")
+    print(f"[DEBUG] skip_samples = {skip_samples}")
+    print(f"[DEBUG] samples_per_ms = {samples_per_ms}")
+    print(f"[DEBUG] total_ms_available = {total_ms_available}")
+    print(f"[DEBUG] settings.msToProcess(原始) = {settings.msToProcess}")
+
+    if total_ms_available <= 0:
+        raise RuntimeError("skip 之后没有足够样本用于处理。")
+
+    # 如果设置的 msToProcess 超过文件可提供的长度，就自动裁剪
+    if settings.msToProcess > total_ms_available:
+        print(
+            f"warning: settings.msToProcess = {settings.msToProcess} ms "
+            f"大于文件可用长度 {total_ms_available} ms，自动裁剪为可用长度。"
+        )
+        settings.msToProcess = int(total_ms_available)
+
+    print(f"[DEBUG] settings.msToProcess(实际使用) = {settings.msToProcess}")
+
+    # ---------- 捕获阶段 ----------
+    if settings.skipAcquisition == 0 or acq_results is None:
+        # 读取 11 ms 数据用于粗捕获 + 精细频率估计
+        n_samples_acq = 11 * samples_per_ms
 
         start_idx = skip_samples
-        end_idx = start_idx + n_samples
+        end_idx = start_idx + n_samples_acq
 
         if end_idx > raw_signal.size:
             raise RuntimeError(
@@ -198,13 +225,16 @@ def post_processing(settings, acq_results: Optional[dict] = None):
     channel = pre_run(acq_results, settings)
     show_channel_status(channel, settings)
 
-    # ---------- 跟踪阶段（使用内存版 tracking_from_array） ----------
+    # ---------- 跟踪阶段（使用 skip 之后的所有数据） ----------
     start_time = datetime.now()
     print(f"   Tracking started at {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"   跟踪开始于 {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
-    # 这里不再传文件句柄，而是整段 raw_signal
-    track_results, channel = tracking_from_array(raw_signal, channel, settings)
+    # 这里不再手动裁剪到 msToProcess*samples_per_ms，
+    # 而是把 skip 之后的所有样本都交给 tracking。
+    track_signal = raw_signal[skip_samples:].astype(np.float64, copy=False)
+
+    track_results, channel = tracking_from_array(track_signal, channel, settings)
 
     elapsed = datetime.now() - start_time
     # 格式化为 HH:MM:SS
@@ -255,7 +285,7 @@ def post_processing(settings, acq_results: Optional[dict] = None):
     print("   Processing is complete for this data block")
     print("   此数据块处理完毕")
 
-    # ---------- 绘图（改为“手动决定是否画 tracking 图”） ----------
+    # ---------- 绘图（tracking 是否画图由用户控制） ----------
     print("   Ploting results...")
     print("   正在绘制结果...")
 
@@ -287,7 +317,7 @@ def post_processing(settings, acq_results: Optional[dict] = None):
     else:
         print("   settings.plotTracking = False，跳过跟踪结果绘图。")
 
-    # 2) 导航结果：保留原逻辑（如果你也想手动控制，可以再加一个 settings 开关）
+    # 2) 导航结果
     plot_navigation(nav_solutions, settings)
 
     print("Post processing of the signal is over.")

@@ -71,11 +71,41 @@ def post_navigation(
 
     n_ch = settings.numberOfChannels
 
+    # 在函数内部加一个小工具，用于构造“空 nav”
+    def _make_empty_nav(num_epochs: int = 0):
+        nav = SimpleNamespace()
+        nav.channel = SimpleNamespace()
+
+        nav.channel.PRN        = np.zeros((n_ch, num_epochs), dtype=int)
+        nav.channel.rawP       = np.zeros((n_ch, num_epochs), dtype=float)
+        nav.channel.correctedP = np.zeros((n_ch, num_epochs), dtype=float)
+        nav.channel.az         = np.zeros((n_ch, num_epochs), dtype=float)
+        nav.channel.el         = np.zeros((n_ch, num_epochs), dtype=float)
+
+        nav.DOP       = np.zeros((5, num_epochs), dtype=float)
+        nav.X         = np.zeros(num_epochs, dtype=float)
+        nav.Y         = np.zeros(num_epochs, dtype=float)
+        nav.Z         = np.zeros(num_epochs, dtype=float)
+        nav.dt        = np.zeros(num_epochs, dtype=float)
+        nav.latitude  = np.zeros(num_epochs, dtype=float)
+        nav.longitude = np.zeros(num_epochs, dtype=float)
+        nav.height    = np.zeros(num_epochs, dtype=float)
+        nav.E         = np.zeros(num_epochs, dtype=float)
+        nav.N         = np.zeros(num_epochs, dtype=float)
+        nav.U         = np.zeros(num_epochs, dtype=float)
+        nav.utmZone   = None
+        return nav
+
+
     # ---------- 0. 检查数据长度 & 跟踪卫星数量 ----------
     num_tracked = sum(1 for tr in track_results if _get_field(tr, "status") != "-")
+    print(f"[NAV DEBUG] msToProcess={settings.msToProcess}, num_tracked={num_tracked}")
+
     if settings.msToProcess < 36000 or num_tracked < 4:
         print("记录时间太短或跟踪到的卫星太少。正在退出！")
-        return SimpleNamespace(), {}
+        nav_empty = _make_empty_nav(0)
+        return nav_empty, {}
+
 
     # ---------- 1. 寻找前导码起始位置 ----------
     sub_frame_start, active_chn_list = find_preambles(track_results, settings)
@@ -133,14 +163,18 @@ def post_navigation(
     # ---------- 3. 再次检查卫星数量 ----------
     if len(active_chn_list) < 4 or TOW is None:
         print("拥有星历数据的卫星太少，无法进行位置计算。正在退出！")
-        return SimpleNamespace(), eph
+        nav_empty = _make_empty_nav(0)
+        return nav_empty, eph
+
 
     # ---------- 4. 初始化解算结果结构 ----------
     max_start = int(np.max(sub_frame_start))
     num_epochs = int((settings.msToProcess - max_start) // settings.navSolPeriod)
     if num_epochs <= 0:
         print("可用测量历元数为 0。正在退出！")
-        return SimpleNamespace(), eph
+        nav_empty = _make_empty_nav(0)
+        return nav_empty, eph
+
 
     nav = SimpleNamespace()
     nav.channel = SimpleNamespace()

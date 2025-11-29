@@ -28,7 +28,7 @@ def main():
     # 是否在 tracking 中打印进度
     #   True  -> 按一定间隔打印
     #   False -> 完全不打印（tracking_core 里就不会 print）
-    settings.verboseTracking = True
+    settings.verboseTracking = False
 
     # 每隔多少毫秒打印一次进度（单位：ms）
     # 例如：
