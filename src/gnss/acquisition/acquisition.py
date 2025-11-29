@@ -1,5 +1,5 @@
 import numpy as np
-from .settings import GnssSettings
+from settings import GnssSettings
 
 def acquisition_parallel_code_phase_search(long_signal: np.ndarray,
                                            settings: GnssSettings):

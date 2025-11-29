@@ -161,23 +161,39 @@ def post_processing(settings, acq_results: Optional[dict] = None):
     print(f"   Tracking is over (elapsed time {hhmmss})")
     print(f"   跟踪结束 (耗时 {hhmmss})")
 
-    # ---------- 保存结果 ----------
-    print('   Saving Acq & Tracking results to "trackingResults.npz"')
-    print('   正在将捕获和跟踪结果保存到 "trackingResults.npz" 文件中')
+    # ---------- 保存结果（由用户控制，带时间戳） ----------
+    save_results: bool = getattr(settings, "saveTrackingResults", False)
+    results_dir: str = getattr(settings, "resultsDir", "Results_Data")
 
-    _save_tracking_results(
-        "trackingResults.npz",
-        track_results,
-        settings,
-        acq_results
-        if isinstance(acq_results, dict)
-        else {
-            "carr_freq": acq_results.carrFreq,
-            "code_phase": acq_results.codePhase,
-            "peak_metric": acq_results.peakMetric,
-        },
-        channel,
-    )
+    if save_results:
+        # 确保目录存在
+        os.makedirs(results_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_path = os.path.join(results_dir, f"trackingResults_{timestamp}.npz")
+
+        print(f'   Saving Acq & Tracking results to "{out_path}"')
+        print(f'   正在将捕获和跟踪结果保存到 "{out_path}" 文件中')
+
+        # 将 acq_results 统一为 dict 形式再保存
+        if isinstance(acq_results, dict):
+            acq_to_save = acq_results
+        else:
+            acq_to_save = {
+                "carr_freq": acq_results.carrFreq,
+                "code_phase": acq_results.codePhase,
+                "peak_metric": acq_results.peakMetric,
+            }
+
+        _save_tracking_results(
+            out_path,
+            track_results,
+            settings,
+            acq_to_save,
+            channel,
+        )
+    else:
+        print("   Skip saving trackingResults (settings.saveTrackingResults = False)")
+        print("   跳过保存 trackingResults（如需保存，请将 settings.saveTrackingResults 设为 True）")
 
     # ---------- 导航解算 ----------
     print("   Calculating navigation solutions...")

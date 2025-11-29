@@ -28,8 +28,19 @@ class Settings:
     numberOfChannels: int = 8         # 通道数
     skipNumberOfBytes: int = 0        # 从文件开头跳过的字节数
 
-    # ✅ GPU 开关：False=只用 CPU，True=尝试用 CuPy+GPU
-    use_gpu_tracking: bool = False    # <<< 新增
+    # ✅ GPU 开关相关（tracking_core 会用到）
+    use_gpu_tracking: bool = False    # False=只用 CPU，True=尝试用 CuPy+GPU
+
+    # ✅ 跟踪过程输出 & 手动停止相关（tracking_core 会用到）
+    verboseTracking: bool = True          # 是否在跟踪过程中打印进度信息
+    trackingPrintInterval: int = 1000     # 每隔多少 ms 打印一次进度
+    enableManualStopTracking: bool = True
+    # True 时：在 Windows 控制台按 Q/q 可提前终止 tracking
+    # False 时：完全忽略按键，只能跑完或 Ctrl+C
+
+    # ✅ 是否保存 tracking 结果
+    saveTrackingResults: bool = False        # 是否保存 tracking 结果
+    resultsDir: str = "Results_Data"        # 保存目录
 
     # ===== 原始信号文件及相关参数 ========================================
     """

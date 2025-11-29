@@ -13,6 +13,12 @@ try:
 except ImportError:
     cp = None
 
+# Windows 控制台按键检测（用于手动停止）
+try:
+    import msvcrt  # 仅 Windows 有
+except ImportError:
+    msvcrt = None
+
 from gnss.tracking.loop.calc_loop_coef import calc_loop_coef
 from gnss.acquisition.ca_code import generate_ca_code  # ✅ 从 acquisition 导入，而不是 tracking
 
@@ -90,6 +96,11 @@ def tracking(
 ) -> Tuple[Sequence[SimpleNamespace], Sequence]:
     """
     Python 版 tracking.m（基于“文件流”逐毫秒读取数据）
+
+    支持两种手动终止方式：
+    1) Ctrl+C：捕获 KeyboardInterrupt，优雅退出并返回当前结果
+    2) （可选）Windows 下按 Q / q：
+       settings.enableManualStopTracking = True 时生效
     """
 
     n_ch = settings.numberOfChannels
@@ -98,6 +109,9 @@ def tracking(
     # 打印控制（带默认值）
     verbose = getattr(settings, "verboseTracking", True)
     print_interval = getattr(settings, "trackingPrintInterval", 1000)
+
+    # 手动停止开关（可选）
+    enable_manual_stop = getattr(settings, "enableManualStopTracking", False)
 
     # ================= 初始化 trackResults 结构 =================
     track_results = _init_track_results(code_periods, n_ch)
@@ -127,6 +141,8 @@ def tracking(
     fs = float(settings.samplingFreq)
     code_len = float(settings.codeLength)
     code_freq_basis = float(settings.codeFreqBasis)
+
+    stop_all = False  # 用于在任意通道/任意毫秒请求停止时，提前退出所有通道
 
     # ================== 通道循环 ==================
     for ch_idx in range(n_ch):
@@ -163,117 +179,148 @@ def tracking(
         old_carr_nco = 0.0
         old_carr_err = 0.0
 
-        # ================== 毫秒循环 ==================
-        for loop_cnt in range(code_periods):
-            if verbose and ((loop_cnt + 1) % print_interval == 0):
-                print(
-                    f"Tracking: Ch {ch_idx+1}/{n_ch} "
-                    f"PRN {prn}; {loop_cnt+1}/{code_periods} ms"
+        try:
+            # ================== 毫秒循环 ==================
+            for loop_cnt in range(code_periods):
+                if verbose and ((loop_cnt + 1) % print_interval == 0):
+                    msg = (
+                        f"Tracking: Ch {ch_idx+1}/{n_ch} "
+                        f"PRN {prn}; {loop_cnt+1}/{code_periods} ms"
+                    )
+                    if enable_manual_stop:
+                        msg += "   [按 Q 手动停止 / Ctrl+C 强制退出]"
+                    else:
+                        msg += "   [Ctrl+C 强制退出]"
+                    print(msg)
+
+                # === 手动停止逻辑（按键 Q / q，Windows 控制台） ===
+                if enable_manual_stop and (msvcrt is not None) and msvcrt.kbhit():
+                    key = msvcrt.getch()
+                    if key in (b"q", b"Q"):
+                        print(
+                            f"\n[Tracking] 用户按下 Q，提前终止跟踪 "
+                            f"(Ch {ch_idx+1}, PRN {prn}, {loop_cnt+1}/{code_periods} ms)"
+                        )
+                        tr.status = "K"  # Killed / 手动终止
+                        stop_all = True
+                        break
+
+                # ---------- 读取本 ms 数据 ----------
+                code_phase_step = code_freq / fs
+                blksize = int(np.ceil((code_len - rem_code_phase) / code_phase_step))
+
+                raw = np.fromfile(f, dtype=dtype, count=blksize)
+                if raw.size != blksize:
+                    print("Not able to read the specified number of samples for tracking, exiting!")
+                    stop_all = True
+                    break
+
+                raw = raw.astype(float)
+
+                # ---------- 生成 E/P/L 码序列 ----------
+                idx_array = np.arange(blksize, dtype=float)
+
+                # Early
+                t_early = rem_code_phase - early_late_spc + idx_array * code_phase_step
+                idx_e = np.ceil(t_early).astype(int)
+                early_code = ca_ext[idx_e]
+
+                # Late
+                t_late = rem_code_phase + early_late_spc + idx_array * code_phase_step
+                idx_l = np.ceil(t_late).astype(int)
+                late_code = ca_ext[idx_l]
+
+                # Prompt
+                t_prompt = rem_code_phase + idx_array * code_phase_step
+                idx_p = np.ceil(t_prompt).astype(int)
+                prompt_code = ca_ext[idx_p]
+
+                # 更新余码相位（下一毫秒的起点）
+                rem_code_phase = (t_prompt[-1] + code_phase_step) - (code_len - 0.0)
+
+                # ---------- 生成本地载波 ----------
+                time = np.arange(blksize + 1, dtype=float) / fs
+                trigarg = 2.0 * np.pi * carr_freq * time + rem_carr_phase
+                rem_carr_phase = np.mod(trigarg[-1], 2.0 * np.pi)
+
+                carr_cos = np.cos(trigarg[:-1])
+                carr_sin = np.sin(trigarg[:-1])
+
+                q_baseband = carr_cos * raw
+                i_baseband = carr_sin * raw
+
+                # ---------- 相关积分 ----------
+                I_E = float(np.sum(early_code * i_baseband))
+                Q_E = float(np.sum(early_code * q_baseband))
+                I_P = float(np.sum(prompt_code * i_baseband))
+                Q_P = float(np.sum(prompt_code * q_baseband))
+                I_L = float(np.sum(late_code * i_baseband))
+                Q_L = float(np.sum(late_code * q_baseband))
+
+                # ================= PLL：载波环 =================
+                if I_P != 0.0:
+                    carr_err = np.arctan(Q_P / I_P) / (2.0 * np.pi)
+                else:
+                    carr_err = 0.0
+
+                carr_nco = (
+                    old_carr_nco
+                    + (tau2_carr / tau1_carr) * (carr_err - old_carr_err)
+                    + carr_err * (PDI_carr / tau1_carr)
                 )
+                old_carr_nco = carr_nco
+                old_carr_err = carr_err
 
-            # ---------- 读取本 ms 数据 ----------
-            code_phase_step = code_freq / fs
-            blksize = int(np.ceil((code_len - rem_code_phase) / code_phase_step))
+                carr_freq = carr_freq_basis + carr_nco
+                tr.carrFreq[loop_cnt] = carr_freq
 
-            raw = np.fromfile(f, dtype=dtype, count=blksize)
-            if raw.size != blksize:
-                print("Not able to read the specified number of samples for tracking, exiting!")
-                return track_results, channel
+                # ================= DLL：码环 =================
+                mag_E = np.hypot(I_E, Q_E)
+                mag_L = np.hypot(I_L, Q_L)
+                denom = mag_E + mag_L
 
-            raw = raw.astype(float)
+                if denom != 0.0:
+                    code_err = (mag_E - mag_L) / denom
+                else:
+                    code_err = 0.0
 
-            # ---------- 生成 E/P/L 码序列 ----------
-            idx_array = np.arange(blksize, dtype=float)
+                code_nco = (
+                    old_code_nco
+                    + (tau2_code / tau1_code) * (code_err - old_code_err)
+                    + code_err * (PDI_code / tau1_code)
+                )
+                old_code_nco = code_nco
+                old_code_err = code_err
 
-            # Early
-            t_early = rem_code_phase - early_late_spc + idx_array * code_phase_step
-            idx_e = np.ceil(t_early).astype(int)
-            early_code = ca_ext[idx_e]
+                code_freq = code_freq_basis - code_nco
+                tr.codeFreq[loop_cnt] = code_freq
 
-            # Late
-            t_late = rem_code_phase + early_late_spc + idx_array * code_phase_step
-            idx_l = np.ceil(t_late).astype(int)
-            late_code = ca_ext[idx_l]
+                # ================= 记录测量值 =================
+                tr.absoluteSample[loop_cnt] = f.tell()
 
-            # Prompt
-            t_prompt = rem_code_phase + idx_array * code_phase_step
-            idx_p = np.ceil(t_prompt).astype(int)
-            prompt_code = ca_ext[idx_p]
+                tr.dllDiscr[loop_cnt] = code_err
+                tr.dllDiscrFilt[loop_cnt] = code_nco
+                tr.pllDiscr[loop_cnt] = carr_err
+                tr.pllDiscrFilt[loop_cnt] = carr_nco
 
-            # 更新余码相位（下一毫秒的起点）
-            rem_code_phase = (t_prompt[-1] + code_phase_step) - (code_len - 0.0)
+                tr.I_E[loop_cnt] = I_E
+                tr.I_P[loop_cnt] = I_P
+                tr.I_L[loop_cnt] = I_L
+                tr.Q_E[loop_cnt] = Q_E
+                tr.Q_P[loop_cnt] = Q_P
+                tr.Q_L[loop_cnt] = Q_L
 
-            # ---------- 生成本地载波 ----------
-            time = np.arange(blksize + 1, dtype=float) / fs
-            trigarg = 2.0 * np.pi * carr_freq * time + rem_carr_phase
-            rem_carr_phase = np.mod(trigarg[-1], 2.0 * np.pi)
-
-            carr_cos = np.cos(trigarg[:-1])
-            carr_sin = np.sin(trigarg[:-1])
-
-            q_baseband = carr_cos * raw
-            i_baseband = carr_sin * raw
-
-            # ---------- 相关积分 ----------
-            I_E = float(np.sum(early_code * i_baseband))
-            Q_E = float(np.sum(early_code * q_baseband))
-            I_P = float(np.sum(prompt_code * i_baseband))
-            Q_P = float(np.sum(prompt_code * q_baseband))
-            I_L = float(np.sum(late_code * i_baseband))
-            Q_L = float(np.sum(late_code * q_baseband))
-
-            # ================= PLL：载波环 =================
-            if I_P != 0.0:
-                carr_err = np.arctan(Q_P / I_P) / (2.0 * np.pi)
-            else:
-                carr_err = 0.0
-
-            carr_nco = (
-                old_carr_nco
-                + (tau2_carr / tau1_carr) * (carr_err - old_carr_err)
-                + carr_err * (PDI_carr / tau1_carr)
+        except KeyboardInterrupt:
+            print(
+                f"\n[Tracking] 检测到 Ctrl+C，中止跟踪 "
+                f"(Ch {ch_idx+1}, PRN {prn})"
             )
-            old_carr_nco = carr_nco
-            old_carr_err = carr_err
+            tr.status = "K"
+            stop_all = True
 
-            carr_freq = carr_freq_basis + carr_nco
-            tr.carrFreq[loop_cnt] = carr_freq
-
-            # ================= DLL：码环 =================
-            mag_E = np.hypot(I_E, Q_E)
-            mag_L = np.hypot(I_L, Q_L)
-            denom = mag_E + mag_L
-
-            if denom != 0.0:
-                code_err = (mag_E - mag_L) / denom
-            else:
-                code_err = 0.0
-
-            code_nco = (
-                old_code_nco
-                + (tau2_code / tau1_code) * (code_err - old_code_err)
-                + code_err * (PDI_code / tau1_code)
-            )
-            old_code_nco = code_nco
-            old_code_err = code_err
-
-            code_freq = code_freq_basis - code_nco
-            tr.codeFreq[loop_cnt] = code_freq
-
-            # ================= 记录测量值 =================
-            tr.absoluteSample[loop_cnt] = f.tell()
-
-            tr.dllDiscr[loop_cnt] = code_err
-            tr.dllDiscrFilt[loop_cnt] = code_nco
-            tr.pllDiscr[loop_cnt] = carr_err
-            tr.pllDiscrFilt[loop_cnt] = carr_nco
-
-            tr.I_E[loop_cnt] = I_E
-            tr.I_P[loop_cnt] = I_P
-            tr.I_L[loop_cnt] = I_L
-            tr.Q_E[loop_cnt] = Q_E
-            tr.Q_P[loop_cnt] = Q_P
-            tr.Q_L[loop_cnt] = Q_L
+        # 当前通道结束后，如果收到全局停止信号，则不再继续后续通道
+        if stop_all:
+            break
 
         tr.status = _as_attr(ch, "status")
 
@@ -293,6 +340,10 @@ def tracking_from_array(
 
     - raw_signal: 一次性读入的原始 IF 数据（numpy 一维数组）
     - 内部根据 settings.use_gpu_tracking 选择 numpy / cupy 进行批量运算
+
+    同样支持：
+    1) Ctrl+C 手动终止（优雅退出）
+    2) （可选）Windows 下按 Q / q（settings.enableManualStopTracking = True）
     """
 
     n_ch = settings.numberOfChannels
@@ -304,6 +355,9 @@ def tracking_from_array(
     # 打印控制（带默认值）
     verbose = getattr(settings, "verboseTracking", True)
     print_interval = getattr(settings, "trackingPrintInterval", 1000)
+
+    # 手动停止开关（可选）
+    enable_manual_stop = getattr(settings, "enableManualStopTracking", False)
 
     # ================= 初始化 trackResults 结构（始终用 numpy 保存结果） =================
     track_results = _init_track_results(code_periods, n_ch)
@@ -344,6 +398,8 @@ def tracking_from_array(
     code_len = float(settings.codeLength)
     code_freq_basis = float(settings.codeFreqBasis)
 
+    stop_all = False  # 全局停止标志
+
     # ================== 通道循环 ==================
     for ch_idx in range(n_ch):
         ch = channel[ch_idx]
@@ -378,126 +434,156 @@ def tracking_from_array(
         old_carr_nco = 0.0
         old_carr_err = 0.0
 
-        # ================== 毫秒循环 ==================
-        for loop_cnt in range(code_periods):
-            if verbose and ((loop_cnt + 1) % print_interval == 0):
-                backend = "GPU" if (xp is cp) else "CPU"
-                print(
-                    f"[{backend} ARRAY] Tracking: Ch {ch_idx+1}/{n_ch} "
-                    f"PRN {prn}; {loop_cnt+1}/{code_periods} ms"
+        try:
+            # ================== 毫秒循环 ==================
+            for loop_cnt in range(code_periods):
+                if verbose and ((loop_cnt + 1) % print_interval == 0):
+                    backend = "GPU" if (xp is cp) else "CPU"
+                    msg = (
+                        f"[{backend} ARRAY] Tracking: Ch {ch_idx+1}/{n_ch} "
+                        f"PRN {prn}; {loop_cnt+1}/{code_periods} ms"
+                    )
+                    if enable_manual_stop:
+                        msg += "   [按 Q 手动停止 / Ctrl+C 强制退出]"
+                    else:
+                        msg += "   [Ctrl+C 强制退出]"
+                    print(msg)
+
+                # === 手动停止逻辑（按键 Q / q，Windows 控制台） ===
+                if enable_manual_stop and (msvcrt is not None) and msvcrt.kbhit():
+                    key = msvcrt.getch()
+                    if key in (b"q", b"Q"):
+                        print(
+                            f"\n[ARRAY Tracking] 用户按下 Q，提前终止跟踪 "
+                            f"(Ch {ch_idx+1}, PRN {prn}, {loop_cnt+1}/{code_periods} ms)"
+                        )
+                        tr.status = "K"
+                        stop_all = True
+                        break
+
+                # ---------- 读取本 ms 数据（从 numpy 数组切片） ----------
+                code_phase_step = code_freq / fs
+                blksize = int(np.ceil((code_len - rem_code_phase) / code_phase_step))
+
+                if pos + blksize > total_samples:
+                    print(
+                        f"[ARRAY] Not enough samples for tracking "
+                        f"(ch={ch_idx+1}, loop={loop_cnt+1}), exiting!"
+                    )
+                    stop_all = True
+                    break
+
+                # numpy 切片 → xp.asarray（在 GPU 模式下搬到显存）
+                raw_np = raw_signal[pos : pos + blksize]
+                raw = xp.asarray(raw_np, dtype=float)
+                pos += blksize  # 指针前移，模拟 fromfile 的顺序读取
+
+                # ---------- 生成 E/P/L 码序列（全部在 xp 上运算） ----------
+                idx_array = xp.arange(blksize, dtype=float)
+
+                # Early
+                t_early = rem_code_phase - early_late_spc + idx_array * code_phase_step
+                idx_e = xp.ceil(t_early).astype(int)
+                early_code = ca_ext_xp[idx_e]
+
+                # Late
+                t_late = rem_code_phase + early_late_spc + idx_array * code_phase_step
+                idx_l = xp.ceil(t_late).astype(int)
+                late_code = ca_ext_xp[idx_l]
+
+                # Prompt
+                t_prompt = rem_code_phase + idx_array * code_phase_step
+                idx_p = xp.ceil(t_prompt).astype(int)
+                prompt_code = ca_ext_xp[idx_p]
+
+                # 更新余码相位（下一毫秒的起点）——这里用 numpy 把最后一个元素取回来
+                t_prompt_last = float(t_prompt[-1])  # cupy/numpy → Python float
+                rem_code_phase = (t_prompt_last + code_phase_step) - (code_len - 0.0)
+
+                # ---------- 生成本地载波 ----------
+                time = xp.arange(blksize + 1, dtype=float) / fs
+                trigarg = 2.0 * np.pi * carr_freq * time + rem_carr_phase  # np.pi 即可
+                # 结尾相位取回 CPU
+                rem_carr_phase = float(trigarg[-1] % (2.0 * np.pi))
+
+                carr_cos = xp.cos(trigarg[:-1])
+                carr_sin = xp.sin(trigarg[:-1])
+
+                q_baseband = carr_cos * raw
+                i_baseband = carr_sin * raw
+
+                # ---------- 相关积分：在 xp 上求和，结果转为 Python float ----------
+                I_E = float(xp.sum(early_code * i_baseband))
+                Q_E = float(xp.sum(early_code * q_baseband))
+                I_P = float(xp.sum(prompt_code * i_baseband))
+                Q_P = float(xp.sum(prompt_code * q_baseband))
+                I_L = float(xp.sum(late_code * i_baseband))
+                Q_L = float(xp.sum(late_code * q_baseband))
+
+                # ================= PLL：载波环（标量计算，用 CPU 即可） =================
+                if I_P != 0.0:
+                    carr_err = np.arctan(Q_P / I_P) / (2.0 * np.pi)
+                else:
+                    carr_err = 0.0
+
+                carr_nco = (
+                    old_carr_nco
+                    + (tau2_carr / tau1_carr) * (carr_err - old_carr_err)
+                    + carr_err * (PDI_carr / tau1_carr)
                 )
+                old_carr_nco = carr_nco
+                old_carr_err = carr_err
 
-            # ---------- 读取本 ms 数据（从 numpy 数组切片） ----------
-            code_phase_step = code_freq / fs
-            blksize = int(np.ceil((code_len - rem_code_phase) / code_phase_step))
+                carr_freq = carr_freq_basis + carr_nco
+                tr.carrFreq[loop_cnt] = carr_freq
 
-            if pos + blksize > total_samples:
-                print(
-                    f"[ARRAY] Not enough samples for tracking "
-                    f"(ch={ch_idx+1}, loop={loop_cnt+1}), exiting!"
+                # ================= DLL：码环（标量计算） =================
+                mag_E = np.hypot(I_E, Q_E)
+                mag_L = np.hypot(I_L, Q_L)
+                denom = mag_E + mag_L
+
+                if denom != 0.0:
+                    code_err = (mag_E - mag_L) / denom
+                else:
+                    code_err = 0.0
+
+                code_nco = (
+                    old_code_nco
+                    + (tau2_code / tau1_code) * (code_err - old_code_err)
+                    + code_err * (PDI_code / tau1_code)
                 )
-                return track_results, channel
+                old_code_nco = code_nco
+                old_code_err = code_err
 
-            # numpy 切片 → xp.asarray（在 GPU 模式下搬到显存）
-            raw_np = raw_signal[pos : pos + blksize]
-            raw = xp.asarray(raw_np, dtype=float)
-            pos += blksize  # 指针前移，模拟 fromfile 的顺序读取
+                code_freq = code_freq_basis - code_nco
+                tr.codeFreq[loop_cnt] = code_freq
 
-            # ---------- 生成 E/P/L 码序列（全部在 xp 上运算） ----------
-            idx_array = xp.arange(blksize, dtype=float)
+                # ================= 记录测量值 =================
+                # absoluteSample 仍以“样本索引对应字节偏移”近似
+                tr.absoluteSample[loop_cnt] = pos * bytes_per_sample
 
-            # Early
-            t_early = rem_code_phase - early_late_spc + idx_array * code_phase_step
-            idx_e = xp.ceil(t_early).astype(int)
-            early_code = ca_ext_xp[idx_e]
+                tr.dllDiscr[loop_cnt] = code_err
+                tr.dllDiscrFilt[loop_cnt] = code_nco
+                tr.pllDiscr[loop_cnt] = carr_err
+                tr.pllDiscrFilt[loop_cnt] = carr_nco
 
-            # Late
-            t_late = rem_code_phase + early_late_spc + idx_array * code_phase_step
-            idx_l = xp.ceil(t_late).astype(int)
-            late_code = ca_ext_xp[idx_l]
+                tr.I_E[loop_cnt] = I_E
+                tr.I_P[loop_cnt] = I_P
+                tr.I_L[loop_cnt] = I_L
+                tr.Q_E[loop_cnt] = Q_E
+                tr.Q_P[loop_cnt] = Q_P
+                tr.Q_L[loop_cnt] = Q_L
 
-            # Prompt
-            t_prompt = rem_code_phase + idx_array * code_phase_step
-            idx_p = xp.ceil(t_prompt).astype(int)
-            prompt_code = ca_ext_xp[idx_p]
-
-            # 更新余码相位（下一毫秒的起点）——这里用 numpy 把最后一个元素取回来
-            t_prompt_last = float(t_prompt[-1])  # cupy/numpy → Python float
-            rem_code_phase = (t_prompt_last + code_phase_step) - (code_len - 0.0)
-
-            # ---------- 生成本地载波 ----------
-            time = xp.arange(blksize + 1, dtype=float) / fs
-            trigarg = 2.0 * np.pi * carr_freq * time + rem_carr_phase  # np.pi 即可
-            # 结尾相位取回 CPU
-            rem_carr_phase = float(trigarg[-1] % (2.0 * np.pi))
-
-            carr_cos = xp.cos(trigarg[:-1])
-            carr_sin = xp.sin(trigarg[:-1])
-
-            q_baseband = carr_cos * raw
-            i_baseband = carr_sin * raw
-
-            # ---------- 相关积分：在 xp 上求和，结果转为 Python float ----------
-            I_E = float(xp.sum(early_code * i_baseband))
-            Q_E = float(xp.sum(early_code * q_baseband))
-            I_P = float(xp.sum(prompt_code * i_baseband))
-            Q_P = float(xp.sum(prompt_code * q_baseband))
-            I_L = float(xp.sum(late_code * i_baseband))
-            Q_L = float(xp.sum(late_code * q_baseband))
-
-            # ================= PLL：载波环（标量计算，用 CPU 即可） =================
-            if I_P != 0.0:
-                carr_err = np.arctan(Q_P / I_P) / (2.0 * np.pi)
-            else:
-                carr_err = 0.0
-
-            carr_nco = (
-                old_carr_nco
-                + (tau2_carr / tau1_carr) * (carr_err - old_carr_err)
-                + carr_err * (PDI_carr / tau1_carr)
+        except KeyboardInterrupt:
+            print(
+                f"\n[ARRAY Tracking] 检测到 Ctrl+C，中止跟踪 "
+                f"(Ch {ch_idx+1}, PRN {prn})"
             )
-            old_carr_nco = carr_nco
-            old_carr_err = carr_err
+            tr.status = "K"
+            stop_all = True
 
-            carr_freq = carr_freq_basis + carr_nco
-            tr.carrFreq[loop_cnt] = carr_freq
-
-            # ================= DLL：码环（标量计算） =================
-            mag_E = np.hypot(I_E, Q_E)
-            mag_L = np.hypot(I_L, Q_L)
-            denom = mag_E + mag_L
-
-            if denom != 0.0:
-                code_err = (mag_E - mag_L) / denom
-            else:
-                code_err = 0.0
-
-            code_nco = (
-                old_code_nco
-                + (tau2_code / tau1_code) * (code_err - old_code_err)
-                + code_err * (PDI_code / tau1_code)
-            )
-            old_code_nco = code_nco
-            old_code_err = code_err
-
-            code_freq = code_freq_basis - code_nco
-            tr.codeFreq[loop_cnt] = code_freq
-
-            # ================= 记录测量值 =================
-            # absoluteSample 仍以“样本索引对应字节偏移”近似
-            tr.absoluteSample[loop_cnt] = pos * bytes_per_sample
-
-            tr.dllDiscr[loop_cnt] = code_err
-            tr.dllDiscrFilt[loop_cnt] = code_nco
-            tr.pllDiscr[loop_cnt] = carr_err
-            tr.pllDiscrFilt[loop_cnt] = carr_nco
-
-            tr.I_E[loop_cnt] = I_E
-            tr.I_P[loop_cnt] = I_P
-            tr.I_L[loop_cnt] = I_L
-            tr.Q_E[loop_cnt] = Q_E
-            tr.Q_P[loop_cnt] = Q_P
-            tr.Q_L[loop_cnt] = Q_L
+        if stop_all:
+            break
 
         tr.status = _as_attr(ch, "status")
 
