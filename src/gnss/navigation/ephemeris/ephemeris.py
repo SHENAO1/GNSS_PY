@@ -39,7 +39,7 @@ def _score_alignment(bits_str: str, start: int) -> int:
         sf = bits_str[sf_start:sf_end]
         if len(sf) < 52:
             continue
-        # 子帧 ID：位 49-52 (Python index)
+        # 子帧 ID：位 49-52 (Python index 49, 50, 51)
         sid = int(sf[49:52], 2)
         if 1 <= sid <= 5:
             score += 1
@@ -49,6 +49,7 @@ def _score_alignment(bits_str: str, start: int) -> int:
 def ephemeris(bits: Union[str, Sequence[int]], D30Star: str = None) -> Tuple[Optional[Dict[str, float]], Optional[int]]:
     """
     Python 版 ephemeris 解码函数。
+    包含详细的 ID 比特流 Debug 功能。
     """
     raw_bits_str = _bits_to_str(bits)
 
@@ -85,6 +86,7 @@ def ephemeris(bits: Union[str, Sequence[int]], D30Star: str = None) -> Tuple[Opt
             if score == 5:
                 break
         
+        # 优先选择得分高的
         if current_max_score > max_score:
             max_score = current_max_score
             best_start = current_best_start
@@ -92,23 +94,27 @@ def ephemeris(bits: Union[str, Sequence[int]], D30Star: str = None) -> Tuple[Opt
             best_mode = mode
 
     if max_score <= 0:
-        print(f"[EPH DEBUG] 无法对齐子帧 (Max Score=0)。")
+        # print(f"[EPH DEBUG] 无法对齐子帧 (Max Score=0)。")
         return None, None
 
     # 2) 截取并解析
     valid_bits = best_bits[best_start : best_start + 1500]
 
     eph: Dict[str, float] = {}
-    found_ids = [] # 记录找到的 ID 序列用于调试
+    found_ids = [] # 记录找到的 ID (整数)
+    debug_id_bits = [] # 记录找到的 ID (原始比特串)
 
     for i in range(5):
         start = 300 * i
         end = 300 * (i + 1)
         subframe = valid_bits[start:end]
         
-        # 提取 ID
-        subframeID = int(subframe[49:52], 2)
-        found_ids.append(subframeID)  # <--- 关键调试信息
+        # 提取 ID (第 49, 50, 51 位)
+        id_str_local = subframe[49:52]
+        subframeID = int(id_str_local, 2)
+        
+        found_ids.append(subframeID)
+        debug_id_bits.append(id_str_local) # <--- 存下来
 
         if subframeID == 1:
             eph["weekNumber"] = int(subframe[60:70], 2) + 1024
@@ -148,9 +154,10 @@ def ephemeris(bits: Union[str, Sequence[int]], D30Star: str = None) -> Tuple[Opt
     missing = [k for k in required_keys if k not in eph]
     
     if missing:
-        # === 这里的打印是关键 ===
-        print(f"[EPH WARN] 模式: {best_mode}, 得分: {max_score}, 发现的ID序列: {found_ids}")
-        print(f"           缺少字段: {missing}")
+        # === 详细调试信息 ===
+        print(f"[EPH FAIL] Mode={best_mode}, Start={best_start}, Score={max_score}")
+        print(f"           IDs found: {found_ids}")
+        print(f"           ID bits  : {debug_id_bits}") 
         return None, None
 
     # 计算 TOW (使用第一个子帧)
