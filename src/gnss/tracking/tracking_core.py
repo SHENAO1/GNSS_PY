@@ -20,7 +20,7 @@ except ImportError:
     msvcrt = None
 
 from gnss.tracking.loop.calc_loop_coef import calc_loop_coef
-from gnss.acquisition.ca_code import generate_ca_code  # ✅ 从 acquisition 导入，而不是 tracking
+from gnss.acquisition.ca_code import generate_ca_code
 
 
 def _dtype_from_string(s: str):
@@ -46,25 +46,40 @@ def _as_attr(obj, name):
 
 
 def _init_track_results(code_periods: int, n_ch: int) -> list[SimpleNamespace]:
-    """创建与 SoftGNSS 结构兼容的 trackResults 列表。"""
-    template = SimpleNamespace(
-        status="-",
-        PRN=0,
-        absoluteSample=np.zeros(code_periods, dtype=np.int64),
-        codeFreq=np.full(code_periods, np.inf, dtype=float),
-        carrFreq=np.full(code_periods, np.inf, dtype=float),
-        I_P=np.zeros(code_periods, dtype=float),
-        I_E=np.zeros(code_periods, dtype=float),
-        I_L=np.zeros(code_periods, dtype=float),
-        Q_E=np.zeros(code_periods, dtype=float),
-        Q_P=np.zeros(code_periods, dtype=float),
-        Q_L=np.zeros(code_periods, dtype=float),
-        dllDiscr=np.full(code_periods, np.inf, dtype=float),
-        dllDiscrFilt=np.full(code_periods, np.inf, dtype=float),
-        pllDiscr=np.full(code_periods, np.inf, dtype=float),
-        pllDiscrFilt=np.full(code_periods, np.inf, dtype=float),
-    )
-    return [SimpleNamespace(**template.__dict__) for _ in range(n_ch)]
+    """
+    创建与 SoftGNSS 结构兼容的 trackResults 列表。
+    【重要修复】必须在循环内部为每个通道单独创建 numpy 数组，
+    防止所有通道共享同一个数组的内存引用。
+    """
+    results = []
+    for _ in range(n_ch):
+        # 必须在这里创建新的数组对象！
+        res = SimpleNamespace(
+            status="-",
+            PRN=0,
+            # 记录绝对采样位置（用于调试）
+            absoluteSample=np.zeros(code_periods, dtype=np.int64),
+            
+            # 频率记录
+            codeFreq=np.full(code_periods, np.inf, dtype=float),
+            carrFreq=np.full(code_periods, np.inf, dtype=float),
+            
+            # 相关器输出
+            I_P=np.zeros(code_periods, dtype=float),
+            I_E=np.zeros(code_periods, dtype=float),
+            I_L=np.zeros(code_periods, dtype=float),
+            Q_E=np.zeros(code_periods, dtype=float),
+            Q_P=np.zeros(code_periods, dtype=float),
+            Q_L=np.zeros(code_periods, dtype=float),
+            
+            # 鉴别器输出
+            dllDiscr=np.full(code_periods, np.inf, dtype=float),
+            dllDiscrFilt=np.full(code_periods, np.inf, dtype=float),
+            pllDiscr=np.full(code_periods, np.inf, dtype=float),
+            pllDiscrFilt=np.full(code_periods, np.inf, dtype=float),
+        )
+        results.append(res)
+    return results
 
 
 def _get_xp(settings):
@@ -96,11 +111,6 @@ def tracking(
 ) -> Tuple[Sequence[SimpleNamespace], Sequence]:
     """
     Python 版 tracking.m（基于“文件流”逐毫秒读取数据）
-
-    支持两种手动终止方式：
-    1) Ctrl+C：捕获 KeyboardInterrupt，优雅退出并返回当前结果
-    2) （可选）Windows 下按 Q / q：
-       settings.enableManualStopTracking = True 时生效
     """
 
     n_ch = settings.numberOfChannels
@@ -114,6 +124,7 @@ def tracking(
     enable_manual_stop = getattr(settings, "enableManualStopTracking", False)
 
     # ================= 初始化 trackResults 结构 =================
+    # 【修复后】每个通道拥有独立的内存空间
     track_results = _init_track_results(code_periods, n_ch)
 
     # ================= 跟踪环参数 =================
@@ -193,7 +204,7 @@ def tracking(
                         msg += "   [Ctrl+C 强制退出]"
                     print(msg)
 
-                # === 手动停止逻辑（按键 Q / q，Windows 控制台） ===
+                # === 手动停止逻辑 ===
                 if enable_manual_stop and (msvcrt is not None) and msvcrt.kbhit():
                     key = msvcrt.getch()
                     if key in (b"q", b"Q"):
@@ -336,14 +347,7 @@ def tracking_from_array(
     settings,
 ) -> Tuple[Sequence[SimpleNamespace], Sequence]:
     """
-    内存数组版 tracking，用于仿真：
-
-    - raw_signal: 一次性读入的原始 IF 数据（numpy 一维数组）
-    - 内部根据 settings.use_gpu_tracking 选择 numpy / cupy 进行批量运算
-
-    同样支持：
-    1) Ctrl+C 手动终止（优雅退出）
-    2) （可选）Windows 下按 Q / q（settings.enableManualStopTracking = True）
+    内存数组版 tracking，用于仿真
     """
 
     n_ch = settings.numberOfChannels
@@ -359,7 +363,8 @@ def tracking_from_array(
     # 手动停止开关（可选）
     enable_manual_stop = getattr(settings, "enableManualStopTracking", False)
 
-    # ================= 初始化 trackResults 结构（始终用 numpy 保存结果） =================
+    # ================= 初始化 trackResults 结构 =================
+    # 【修复后】每个通道拥有独立的内存空间
     track_results = _init_track_results(code_periods, n_ch)
 
     # ================= 跟踪环参数 =================
@@ -382,7 +387,7 @@ def tracking_from_array(
     )
 
     dtype = _dtype_from_string(settings.dataType)
-    bytes_per_sample = np.dtype(dtype).itemsize  # 用 numpy 计算字节数即可
+    bytes_per_sample = np.dtype(dtype).itemsize
 
     # 确保输入为 numpy 数组，类型匹配
     if not isinstance(raw_signal, np.ndarray):
@@ -413,12 +418,12 @@ def tracking_from_array(
 
         # === 该通道对应的起始样本位置（整体数组上的索引） ===
         code_phase_samples = int(_as_attr(ch, "codePhase"))
-        pos = skip_samples + (code_phase_samples - 1)  # 样本索引，而非字节
+        pos = skip_samples + (code_phase_samples - 1)
 
         # === 生成 C/A 码，并前后各扩展一个 chip（先 numpy，后转 xp） ===
-        ca = generate_ca_code(prn)  # numpy array, 长度 1023
-        ca_ext = np.concatenate([[ca[-1]], ca, [ca[0]]])  # numpy, 长度 1025
-        ca_ext_xp = xp.asarray(ca_ext)  # xp 数组，后续在 GPU/CPU 上索引
+        ca = generate_ca_code(prn)
+        ca_ext = np.concatenate([[ca[-1]], ca, [ca[0]]])
+        ca_ext_xp = xp.asarray(ca_ext)
 
         # === 初始化本地 NCO / 相位等变量 ===
         code_freq = code_freq_basis
@@ -449,7 +454,7 @@ def tracking_from_array(
                         msg += "   [Ctrl+C 强制退出]"
                     print(msg)
 
-                # === 手动停止逻辑（按键 Q / q，Windows 控制台） ===
+                # === 手动停止逻辑 ===
                 if enable_manual_stop and (msvcrt is not None) and msvcrt.kbhit():
                     key = msvcrt.getch()
                     if key in (b"q", b"Q"):
@@ -461,7 +466,7 @@ def tracking_from_array(
                         stop_all = True
                         break
 
-                # ---------- 读取本 ms 数据（从 numpy 数组切片） ----------
+                # ---------- 读取本 ms 数据 ----------
                 code_phase_step = code_freq / fs
                 blksize = int(np.ceil((code_len - rem_code_phase) / code_phase_step))
 
@@ -473,12 +478,12 @@ def tracking_from_array(
                     stop_all = True
                     break
 
-                # numpy 切片 → xp.asarray（在 GPU 模式下搬到显存）
+                # numpy 切片 → xp.asarray
                 raw_np = raw_signal[pos : pos + blksize]
                 raw = xp.asarray(raw_np, dtype=float)
-                pos += blksize  # 指针前移，模拟 fromfile 的顺序读取
+                pos += blksize
 
-                # ---------- 生成 E/P/L 码序列（全部在 xp 上运算） ----------
+                # ---------- 生成 E/P/L 码序列 ----------
                 idx_array = xp.arange(blksize, dtype=float)
 
                 # Early
@@ -496,14 +501,13 @@ def tracking_from_array(
                 idx_p = xp.ceil(t_prompt).astype(int)
                 prompt_code = ca_ext_xp[idx_p]
 
-                # 更新余码相位（下一毫秒的起点）——这里用 numpy 把最后一个元素取回来
-                t_prompt_last = float(t_prompt[-1])  # cupy/numpy → Python float
+                # 更新余码相位
+                t_prompt_last = float(t_prompt[-1])
                 rem_code_phase = (t_prompt_last + code_phase_step) - (code_len - 0.0)
 
                 # ---------- 生成本地载波 ----------
                 time = xp.arange(blksize + 1, dtype=float) / fs
-                trigarg = 2.0 * np.pi * carr_freq * time + rem_carr_phase  # np.pi 即可
-                # 结尾相位取回 CPU
+                trigarg = 2.0 * np.pi * carr_freq * time + rem_carr_phase
                 rem_carr_phase = float(trigarg[-1] % (2.0 * np.pi))
 
                 carr_cos = xp.cos(trigarg[:-1])
@@ -512,7 +516,7 @@ def tracking_from_array(
                 q_baseband = carr_cos * raw
                 i_baseband = carr_sin * raw
 
-                # ---------- 相关积分：在 xp 上求和，结果转为 Python float ----------
+                # ---------- 相关积分 ----------
                 I_E = float(xp.sum(early_code * i_baseband))
                 Q_E = float(xp.sum(early_code * q_baseband))
                 I_P = float(xp.sum(prompt_code * i_baseband))
@@ -520,7 +524,7 @@ def tracking_from_array(
                 I_L = float(xp.sum(late_code * i_baseband))
                 Q_L = float(xp.sum(late_code * q_baseband))
 
-                # ================= PLL：载波环（标量计算，用 CPU 即可） =================
+                # ================= PLL：载波环 =================
                 if I_P != 0.0:
                     carr_err = np.arctan(Q_P / I_P) / (2.0 * np.pi)
                 else:
@@ -537,7 +541,7 @@ def tracking_from_array(
                 carr_freq = carr_freq_basis + carr_nco
                 tr.carrFreq[loop_cnt] = carr_freq
 
-                # ================= DLL：码环（标量计算） =================
+                # ================= DLL：码环 =================
                 mag_E = np.hypot(I_E, Q_E)
                 mag_L = np.hypot(I_L, Q_L)
                 denom = mag_E + mag_L
@@ -559,7 +563,6 @@ def tracking_from_array(
                 tr.codeFreq[loop_cnt] = code_freq
 
                 # ================= 记录测量值 =================
-                # absoluteSample 仍以“样本索引对应字节偏移”近似
                 tr.absoluteSample[loop_cnt] = pos * bytes_per_sample
 
                 tr.dllDiscr[loop_cnt] = code_err

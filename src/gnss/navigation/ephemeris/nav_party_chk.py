@@ -1,157 +1,88 @@
-"""
-navPartyChk(ndat)
-------------------------------------------------------------
-功能:
-    该函数用于计算和检查 GPS 导航电文“字”(word) 的奇偶校验位。
-    其算法基于 GPS-SPS 信号规范第二版中的图 2-10 流程。
-
-调用格式:
-    status = nav_party_chk(ndat)
-
-输入:
-    ndat    - 一个 1×32 的数组，代表一个 GPS 导航字。
-              包含 30 个当前字比特和 2 个来自前一字的比特。
-              ndat 的结构为:
-                [D29*, D30*, d1, d2, ..., d24, D25, D26, ..., D30]
-
-              注意：ndat 必须已经转换为 “±1 表示法”：
-                     -1 代表 bit = 0
-                     +1 代表 bit = 1
-              这是为了使用乘法模拟 XOR（异或）。
-
-输出:
-    status  - 校验状态:
-                +1: 数据极性正确
-                -1: 数据极性需要反相
-                 0: 奇偶校验失败（数据损坏）
-------------------------------------------------------------
-"""
+# src/gnss/navigation/ephemeris/nav_party_chk.py
 
 import numpy as np
 
-
 def nav_party_chk(ndat: np.ndarray) -> int:
     """
-    Python 版 navPartyChk
-
+    GPS 导航电文奇偶校验 (Parity Check)。
+    
     参数:
-        ndat: numpy 数组，长度 32，元素为 ±1
-              ndat[0] = D29*
-              ndat[1] = D30*
-              ndat[2:26] = d1..d24
-              ndat[26:32] = D25..D30
-
+    ndat: 长度为 32 的数组 (0/1)，包含：
+          - [0:2] : 前一个字的最后两比特 (D29*, D30*)
+          - [2:32]: 当前字的 30 比特 (其中最后 6 比特是接收到的奇偶校验位)
+    
     返回:
-        status: +1, -1, 或 0
+    status: 0 表示校验通过，-1 表示失败。
     """
+    ndat = np.array(ndat, dtype=int).flatten()
+    
+    if len(ndat) != 32:
+        return -1
 
-    # --- 异或(XOR)运算的乘法实现 -----------------------------------------
-    # 使用 -1 表示 '0'，+1 表示 '1'
-    #
-    # a   b   xor    |   (-1=0, +1=1 表示法)
-    # -----------------------------------------
-    #  0   0    1    |   -1 * -1 = +1
-    #  0   1    0    |   -1 * +1 = -1
-    #  1   0    0    |   +1 * -1 = -1
-    #  1   1    1    |   +1 * +1 = +1
-    #
-    # 因此 “乘法” 可以直接模拟 XOR。
-    # -----------------------------------------------------------------------
+    # 提取 D29*, D30* (来自上一个字)
+    d29_star = ndat[0]
+    d30_star = ndat[1]
+    
+    # 当前字的 24 数据位 (d1 ... d24) 对应索引 ndat[2] ... ndat[25]
+    # 接收到的 6 校验位 (PB1 ... PB6) 对应索引 ndat[26] ... ndat[31]
+    d = ndat[2:26]  # 数据位
+    pb_received = ndat[26:32] # 接收到的校验位
 
-    ndat = ndat.copy()  # 避免修改输入
+    # 根据 IS-GPS-200 表 20-XIV 计算校验位
+    # 为了简化计算，定义 parity 位的计算掩码 (源自 IS-GPS-200)
+    
+    pb_calc = np.zeros(6, dtype=int)
+    
+    # 这里的异或运算 (.) 是模2加法
+    
+    # PB1 (D25)
+    idx_1 = [0,1,2,4,5,9,10,11,12,13,16,17,19,22] # 对应 D1..D23
+    sum_1 = d29_star + np.sum(d[idx_1])
+    pb_calc[0] = sum_1 % 2
 
-    # --- 检查数据位是否需要反相 (用于内部计算) -----------------------------
-    # GPS 规范规定：d1~d24 在计算奇偶校验前需要与 D30* 异或。
-    #
-    # MATLAB 代码: if (ndat(2) ~= 1)
-    # 其中 ndat(2)=1 代表 bit=1，ndat(2)=-1 代表 bit=0。
-    #
-    # 所以：
-    #   D30* = 0 → ndat[1] = -1 → 需要内部反相
-    #   D30* = 1 → ndat[1] = +1 → 不反相
-    # -----------------------------------------------------------------------
-    if ndat[1] != 1:  # D30* 是 0 (即 ndat[1] == -1)
-        ndat[2:26] = -ndat[2:26]
+    # PB2 (D26)
+    idx_2 = [1,2,3,5,6,10,11,12,13,14,17,18,20,23]
+    sum_2 = d30_star + np.sum(d[idx_2])
+    pb_calc[1] = sum_2 % 2
 
-    # --- 根据 ICD-200C 表 20-XIV 计算 6 个奇偶校验位 -----------------------
+    # PB3 (D27)
+    idx_3 = [0,2,3,4,6,7,11,12,13,14,15,18,19,21]
+    sum_3 = d29_star + np.sum(d[idx_3])
+    pb_calc[2] = sum_3 % 2
 
-    parity = np.zeros(6)
+    # PB4 (D28)
+    idx_4 = [1,3,4,5,7,8,12,13,14,15,16,19,20,22]
+    sum_4 = d30_star + np.sum(d[idx_4])
+    pb_calc[3] = sum_4 % 2
 
-    # Python 下标注意：ndat[0] = D29*, ndat[1] = D30*, ndat[2]=d1
-    parity[0] = np.prod([
-        ndat[0], ndat[2], ndat[3], ndat[4], ndat[6],
-        ndat[7], ndat[11], ndat[12], ndat[13], ndat[14],
-        ndat[15], ndat[18], ndat[19], ndat[21], ndat[24]
-    ])
+    # PB5 (D29)
+    idx_5 = [0,2,4,5,6,8,9,13,14,15,16,17,20,21,23]
+    sum_5 = d30_star + np.sum(d[idx_5])
+    pb_calc[4] = sum_5 % 2
 
-    parity[1] = np.prod([
-        ndat[1], ndat[3], ndat[4], ndat[5], ndat[7],
-        ndat[8], ndat[12], ndat[13], ndat[14], ndat[15],
-        ndat[16], ndat[19], ndat[20], ndat[22], ndat[25]
-    ])
+    # PB6 (D30)
+    idx_6 = [2,4,6,7,8,9,10,12,14,18,21,22,23]
+    sum_6 = d29_star + np.sum(d[idx_6])
+    pb_calc[5] = sum_6 % 2
 
-    parity[2] = np.prod([
-        ndat[0], ndat[2], ndat[4], ndat[5], ndat[6],
-        ndat[8], ndat[9], ndat[13], ndat[14], ndat[15],
-        ndat[16], ndat[17], ndat[20], ndat[21], ndat[23]
-    ])
-
-    parity[3] = np.prod([
-        ndat[1], ndat[3], ndat[5], ndat[6], ndat[7],
-        ndat[9], ndat[10], ndat[14], ndat[15], ndat[16],
-        ndat[17], ndat[18], ndat[21], ndat[22], ndat[24]
-    ])
-
-    parity[4] = np.prod([
-        ndat[1], ndat[2], ndat[4], ndat[6], ndat[7],
-        ndat[8], ndat[10], ndat[11], ndat[15], ndat[16],
-        ndat[17], ndat[18], ndat[19], ndat[22], ndat[23], ndat[25]
-    ])
-
-    parity[5] = np.prod([
-        ndat[0], ndat[4], ndat[6], ndat[7], ndat[9],
-        ndat[10], ndat[11], ndat[12], ndat[14], ndat[16],
-        ndat[20], ndat[23], ndat[24], ndat[25]
-    ])
-
-    # --- 与接收到的奇偶校验位比较 -----------------------------------------
-    recv_parity = ndat[26:32]
-
-    if np.sum(parity == recv_parity) == 6:
-        # 奇偶校验通过
-        #
-        # 输出规则（与 MATLAB 一致）：
-        #   如果 D30* = 1 (ndat[1]= +1) → status = -1 → 调用者需要反相
-        #   如果 D30* = 0 (ndat[1]= -1) → status = +1 → 数据极性正确
-        status = -1 * ndat[1]
+    # 比较计算出的校验位和接收到的校验位
+    if np.array_equal(pb_calc, pb_received):
+        return 0
     else:
-        # 奇偶校验失败
-        status = 0
-
-    return int(status)
+        return -1
 
 
-def check_t(time):
+def check_t(time: float) -> float:
     """
-    对应 MATLAB 的 check_t.m
-    功能：修正周首 / 周末交叉处的时间（GPS 周滚动）
-
-    输入:
-        time : 标量或 numpy 数组，单位为秒 (s)
-
-    输出:
-        corr_time : 修正后的时间（同维度）
+    处理 GPS 时间的周内跳变（week crossover）。
+    防止计算卫星位置时，传输时间与星历参考时间(toe)跨越了周界（+/- 302400秒）。
     """
-    half_week = 302400.0  # 一周的一半，单位秒
+    half_week = 302400.0
+    corr_time = time
 
-    # 兼容标量和数组
-    t = np.asarray(time, dtype=float)
-    corr = t.copy()
+    if time > half_week:
+        corr_time = time - 2.0 * half_week
+    elif time < -half_week:
+        corr_time = time + 2.0 * half_week
 
-    corr[corr > half_week] -= 2 * half_week
-    corr[corr < -half_week] += 2 * half_week
-
-    # 如果输入是标量，就返回标量，尽量模仿 MATLAB 使用习惯
-    if np.isscalar(time):
-        return float(corr)
-    return corr
+    return corr_time
