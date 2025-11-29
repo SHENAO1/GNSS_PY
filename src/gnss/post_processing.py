@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from datetime import datetime
 from types import SimpleNamespace
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 import numpy as np
 
@@ -59,6 +59,57 @@ def _save_tracking_results(
         acqResults=SimpleNamespace(**acq_results),
         channel=np.array(channel, dtype=object),
     )
+
+
+def _parse_channel_selection(user_input: str, max_ch: int) -> List[int]:
+    """
+    将用户输入的通道选择字符串解析为整数列表。
+
+    允许的形式：
+        "" 或 "all" / "a" / "*"   -> 1..max_ch
+        "1"                       -> [1]
+        "1,3,5"                   -> [1,3,5]
+        "1-4"                     -> [1,2,3,4]
+        "1-3,6"                   -> [1,2,3,6]
+    """
+    text = (user_input or "").strip()
+    if text == "" or text.lower() in ("all", "a", "*"):
+        return list(range(1, max_ch + 1))
+
+    # 兼容中文逗号
+    text = text.replace("，", ",")
+
+    channels: List[int] = []
+
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        # 范围：如 "2-5"
+        if "-" in part:
+            try:
+                start_s, end_s = part.split("-", 1)
+                start = int(start_s)
+                end = int(end_s)
+            except ValueError:
+                continue
+            if start > end:
+                start, end = end, start
+            for ch in range(start, end + 1):
+                if 1 <= ch <= max_ch:
+                    channels.append(ch)
+        else:
+            # 单个通道
+            try:
+                ch = int(part)
+            except ValueError:
+                continue
+            if 1 <= ch <= max_ch:
+                channels.append(ch)
+
+    # 去重并排序
+    channels = sorted(set(channels))
+    return channels
 
 
 def post_processing(settings, acq_results: Optional[dict] = None):
@@ -204,13 +255,39 @@ def post_processing(settings, acq_results: Optional[dict] = None):
     print("   Processing is complete for this data block")
     print("   此数据块处理完毕")
 
-    # ---------- 绘图 ----------
+    # ---------- 绘图（改为“手动决定是否画 tracking 图”） ----------
     print("   Ploting results...")
     print("   正在绘制结果...")
 
-    if settings.plotTracking:
-        plot_tracking(range(1, settings.numberOfChannels + 1), track_results, settings)
+    # 1) 跟踪结果：由 settings.plotTracking + 交互式输入共同控制
+    if getattr(settings, "plotTracking", False):
+        try:
+            ans = input("是否绘制跟踪结果图？(y/n，回车默认为 n): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"
 
+        if ans.startswith("y"):
+            prompt = (
+                f"请输入要绘制的通道号，例如 1 或 1,3,5 或 1-4 或 all "
+                f"(默认 all，当前最多 {settings.numberOfChannels} 路): "
+            )
+            try:
+                ch_text = input(prompt)
+            except (EOFError, KeyboardInterrupt):
+                ch_text = ""
+
+            channels = _parse_channel_selection(ch_text, settings.numberOfChannels)
+            if channels:
+                print(f"   正在绘制通道 {channels} 的跟踪结果图...")
+                plot_tracking(channels, track_results, settings)
+            else:
+                print("   未选择有效通道，跳过绘制跟踪结果。")
+        else:
+            print("   用户选择不绘制跟踪结果图。")
+    else:
+        print("   settings.plotTracking = False，跳过跟踪结果绘图。")
+
+    # 2) 导航结果：保留原逻辑（如果你也想手动控制，可以再加一个 settings 开关）
     plot_navigation(nav_solutions, settings)
 
     print("Post processing of the signal is over.")

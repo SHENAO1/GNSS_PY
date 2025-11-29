@@ -18,6 +18,12 @@ data/raw/
 *.sig
 *.npz
 
+# Tracking result cache
+trackingResults.npz
+*.npz
+
+
+
 # Jupyter
 .ipynb_checkpoints/
 
