@@ -68,8 +68,9 @@ def post_navigation(
 ) -> Tuple[SimpleNamespace, Dict[int, object]]:
 
     n_ch = settings.numberOfChannels
-    
+
     # ---------- 0. 检查数据长度 & 跟踪卫星数量 ----------
+    print("==== 进入 post_navigation() ====")
     num_tracked = sum(1 for tr in track_results if _get_field(tr, "status") != "-")
     print(f"[NAV DEBUG] msToProcess={settings.msToProcess}, num_tracked={num_tracked}")
 
@@ -95,34 +96,103 @@ def post_navigation(
         # I_P 为每毫秒积分后的同相分量
         I_P = np.asarray(_get_field(tr, "I_P"), dtype=float)
 
+        if I_P.size == 0:
+            print(f"[post_navigation] 通道 {ch} I_P 为空，剔除。")
+            active_chn_list.remove(ch)
+            continue
+
+        # sub_frame_start 是以毫秒为单位的 1-based 索引（跟 MATLAB 一致）
+        sf_ms_1b = int(sub_frame_start[idx])
+        if sf_ms_1b <= 0:
+            print(f"[post_navigation] 通道 {ch} sub_frame_start 非法 ({sf_ms_1b})，剔除。")
+            active_chn_list.remove(ch)
+            continue
+
         # 确保数据足够覆盖 5 个子帧 (1500 bits = 30000 ms)
-        # 从前导码起点往前 20 ms，往后 1500*20-1 ms
-        start_ms = int(sub_frame_start[idx]) - 20
-        end_ms   = int(sub_frame_start[idx]) + 1500 * 20 - 1
+        # SoftGNSS 的做法是：从前导码起点往前 20 ms，往后 1500*20-1 ms
+        start_ms = sf_ms_1b - 20
+        end_ms   = sf_ms_1b + 1500 * 20 - 1
 
         if start_ms < 1 or end_ms > len(I_P):
             print(f"[post_navigation] 通道 {ch} 数据长度不足以提取 5 个子帧，剔除。")
             active_chn_list.remove(ch)
             continue
 
-        # 取出这一段数据
-        seg = I_P[start_ms - 1 : end_ms].copy()
+        # ---- 取出这一段数据 [start_ms, end_ms]，注意 Python 0-based ----
+        seg = I_P[start_ms - 1: end_ms].copy()
+        total_ms = seg.size
 
-        # 按 20ms 一列 reshape 成 20 x N 的矩阵，然后按行求和做符号判决
-        seg_mat       = seg.reshape(-1, 20).T
+        # 这里应该是 30020 ms = 1501 个 20ms 块
+        if total_ms % 20 != 0:
+            print(f"[post_navigation] 通道 {ch} seg 长度不能被 20 整除 (len={total_ms})，剔除。")
+            active_chn_list.remove(ch)
+            continue
+
+        # 按 20ms 一列 reshape 成 20 x N 的矩阵，然后按列求和做符号判决
+        seg_mat       = seg.reshape(-1, 20).T   # 形状 (20, N_bits)
         nav_bits_soft = np.sum(seg_mat, axis=0)
 
         # 门限判决为 0/1（bool 数组）
-        nav_bits = nav_bits_soft > 0
+        nav_bits = nav_bits_soft > 0           # 形状 (N_bits,)，N_bits ~= 1501
 
-        # 取 1500 bit 用于星历解析
-        bits_for_ephem = nav_bits[1:1501]
-        
+        # ---- 计算“当前子帧首 bit 在 nav_bits 中的下标”（更通用，而不是写死 1）----
+        # 原始 ms 索引均为 1-based，先转为 0-based
+        win_ms_1b = start_ms          # 窗口起点 (1-based)
+        win_ms_0b = win_ms_1b - 1     # 0-based
+        sf_ms_0b  = sf_ms_1b - 1      # 子帧起点 (0-based)
+
+        # 每个 bit = 20 ms，整数除即可得到 bit 偏移
+        bit_offset = (sf_ms_0b - win_ms_0b) // 20
+
+        if bit_offset < 0 or bit_offset + 1500 > nav_bits.size:
+            print(
+                f"[post_navigation] 通道 {ch} bit_offset 越界 "
+                f"(offset={bit_offset}, nav_bits.size={nav_bits.size})，剔除。"
+            )
+            active_chn_list.remove(ch)
+            continue
+
+        # 取 1500 bit 用于星历解析（恰好覆盖 5 个子帧）
+        bits_for_ephem = nav_bits[bit_offset: bit_offset + 1500]
+
+        # 当前通道 PRN
         prn = int(_get_field(tr, "PRN"))
+
+        # ---- 调试：直接从 bits_for_ephem 里算 5 个子帧的 ID ----
+        # 假设每个子帧 300 bit，子帧 ID 在每个子帧内的 bit[49:51]（1-based）
+        # 对应 0-based 为 [48:51)
+        ids_debug = []
+        id_bits_debug = []
+        for sf_idx in range(5):
+            sf_start = sf_idx * 300
+            id_start = sf_start + 48
+            id_end   = sf_start + 51  # 不含上界
+
+            if id_end > bits_for_ephem.size:
+                ids_debug.append(-1)
+                id_bits_debug.append("???")
+                continue
+
+            bits_id_bool = bits_for_ephem[id_start:id_end]
+            bits_id_str  = "".join("1" if b else "0" for b in bits_id_bool)
+
+            try:
+                ids_debug.append(int(bits_id_str, 2))
+            except ValueError:
+                ids_debug.append(-1)
+
+            id_bits_debug.append(bits_id_str)
+
+        print(f"[NAV DEBUG] PRN {prn} 子帧 ID(本地算) = {ids_debug}")
+        print(f"[NAV DEBUG] PRN {prn} 子帧 ID bits(本地算) = {id_bits_debug}")
+
+        # 显式转为 '0' / '1' 字符串，完全符合 ephemeris() 的原始接口
+        bit_str = "".join("1" if b else "0" for b in bits_for_ephem)
 
         try:
             # ephemeris 函数现在会尝试自动处理相位反转
-            eph_prn, TOW_new = ephemeris(bits_for_ephem, None)
+            # 第二个参数 D30Star 暂时传 None，由 ephemeris 内部自动处理
+            eph_prn, TOW_new = ephemeris(bit_str, None)
         except Exception as e:
             print(f"[post_navigation] 通道 {ch} (PRN {prn}) 解析异常: {e}")
             active_chn_list.remove(ch)
@@ -151,7 +221,7 @@ def post_navigation(
     # ---------- 4. 初始化解算结果结构 ----------
     max_start   = int(np.max(sub_frame_start))
     num_epochs  = int((settings.msToProcess - max_start) // settings.navSolPeriod)
-    
+
     if num_epochs <= 0:
         print("可用测量历元数为 0。正在退出！")
         return _make_empty_nav(n_ch, 0), eph
@@ -173,9 +243,10 @@ def post_navigation(
         above_mask = [i + 1 for i in range(n_ch) if sat_elev[i] >= settings.elevationMask]
         # 2. 取交集：既有星历(ready_chn_list) 又在高度角以上
         potential_sats = sorted(set(above_mask).intersection(ready_chn_list))
-        
+
         # 3. 严格检查：确保这些卫星真的在 eph 字典里（双重保险）
-        active_now = [ch for ch in potential_sats if int(_get_field(track_results[ch - 1], "PRN")) in eph]
+        active_now = [ch for ch in potential_sats
+                      if int(_get_field(track_results[ch - 1], "PRN")) in eph]
 
         # 记录 PRN
         for ch in active_now:
@@ -183,9 +254,8 @@ def post_navigation(
 
         # 准备数据
         ms_of_signal = sub_frame_start + settings.navSolPeriod * epoch_idx
-        
+
         # 计算伪距
-        # 注意：这里 calculate_pseudoranges 内部可能会返回 NaN，如果信号不好
         raw_p = calculate_pseudoranges(
             track_results,
             ms_of_signal,
@@ -196,17 +266,16 @@ def post_navigation(
 
         # 计算卫星位置
         prn_list = [int(_get_field(track_results[ch - 1], "PRN")) for ch in active_now]
-        
-        # 这里的 eph 必须包含 prn_list 里的所有 PRN
+
         sat_positions, sat_clk_corr = satpos(transmit_time, prn_list, eph, settings)
 
         # 检查 sat_positions 是否包含 NaN
         valid_indices = []
         if sat_positions is not None:
-             for i in range(len(active_now)):
-                 if not np.any(np.isnan(sat_positions[i, :])):
-                     valid_indices.append(i)
-        
+            for i in range(len(active_now)):
+                if not np.any(np.isnan(sat_positions[i, :])):
+                    valid_indices.append(i)
+
         # 只有当有效卫星（位置非NaN）数量 > 3 时才解算
         if len(valid_indices) > 3:
             # 筛选出真正有效的子集
@@ -222,7 +291,7 @@ def post_navigation(
                     final_raw_p + final_sat_clk * settings.c,
                     settings,
                 )
-                
+
                 # 存结果
                 nav.X[epoch_idx]  = xyzdt[0]
                 nav.Y[epoch_idx]  = xyzdt[1]
@@ -231,47 +300,48 @@ def post_navigation(
 
                 # 映射回 active channels
                 for i, ch_idx in enumerate(valid_indices):
-                    ch = active_now[ch_idx] # 原通道号
+                    ch = active_now[ch_idx]  # 原通道号
                     nav.channel.el[ch - 1, epoch_idx] = el[i]
                     nav.channel.az[ch - 1, epoch_idx] = az[i]
-                    # 更新高度角用于下一次循环
-                    sat_elev[ch - 1] = el[i] * 180 / np.pi # 转回角度存 sat_elev? 
-                    # 注意：least_square_pos 返回的是 弧度，但 settings.elevationMask 通常是 角度(10度)
-                    # 请确认你的 elevationMask 单位。通常需要转换。这里假设 settings 用角度。
-                
+                    # 更新高度角用于下一次循环（注意单位转换）
+                    sat_elev[ch - 1] = el[i] * 180.0 / np.pi
+
                 nav.DOP[:, epoch_idx] = DOP
 
                 # 存 correctedP
                 for i, ch_idx in enumerate(valid_indices):
                     ch = active_now[ch_idx]
                     nav.channel.correctedP[ch - 1, epoch_idx] = (
-                        final_raw_p[i] + final_sat_clk[i] * settings.c + nav.dt[epoch_idx]
+                        final_raw_p[i]
+                        + final_sat_clk[i] * settings.c
+                        + nav.dt[epoch_idx]
                     )
 
                 # 经纬度转换
-                lat, lon, hgt = cart2geo(nav.X[epoch_idx], nav.Y[epoch_idx], nav.Z[epoch_idx], 5)
+                lat, lon, hgt = cart2geo(nav.X[epoch_idx],
+                                         nav.Y[epoch_idx],
+                                         nav.Z[epoch_idx],
+                                         5)
                 nav.latitude[epoch_idx]  = lat
                 nav.longitude[epoch_idx] = lon
                 nav.height[epoch_idx]    = hgt
 
                 utm_zone  = find_utm_zone(lat, lon)
                 nav.utmZone = utm_zone
-                E, N, U = cart2utm(nav.X[epoch_idx], nav.Y[epoch_idx], nav.Z[epoch_idx], utm_zone)
+                E, N, U = cart2utm(nav.X[epoch_idx],
+                                   nav.Y[epoch_idx],
+                                   nav.Z[epoch_idx],
+                                   utm_zone)
                 nav.E[epoch_idx] = E
                 nav.N[epoch_idx] = N
                 nav.U[epoch_idx] = U
 
             except np.linalg.LinAlgError:
-                # 捕获 SVD 不收敛，不崩溃，跳过该历元
                 print(f"[NAV WARN] Epoch {epoch_idx}: SVD 不收敛 (可能是矩阵奇异)")
             except Exception as e:
                 print(f"[NAV ERROR] Epoch {epoch_idx}: 未知计算错误 {e}")
 
-        else:
-            # print(f"  测量历元 No. {curr_meas_nr}: 有效卫星不足 ({len(valid_indices)} < 4)。")
-            # 保持 NaN
-            pass
-
+        # 有效卫星不够就保持 NaN
         transmit_time += settings.navSolPeriod / 1000.0
 
     return nav, eph
